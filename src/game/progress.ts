@@ -34,18 +34,21 @@ export function defaultProgress(): Progress {
   return { xp: 600, gold: 150, selectedTank: 't34', tanks, battles: 0, wins: 0, kills: 0 };
 }
 
+export function normalizeProgress(p: Progress): Progress {
+  const d = defaultProgress();
+  // мягкая миграция
+  (Object.keys(d.tanks) as TankId[]).forEach((id) => {
+    if (!p.tanks[id]) p.tanks[id] = d.tanks[id];
+    else p.tanks[id].upgrades = { ...emptyUpgrades(), ...p.tanks[id].upgrades };
+  });
+  return { ...d, ...p };
+}
+
 export function loadProgress(): Progress {
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return defaultProgress();
-    const p = JSON.parse(raw) as Progress;
-    const d = defaultProgress();
-    // мягкая миграция
-    (Object.keys(d.tanks) as TankId[]).forEach((id) => {
-      if (!p.tanks[id]) p.tanks[id] = d.tanks[id];
-      p.tanks[id].upgrades = { ...emptyUpgrades(), ...p.tanks[id].upgrades };
-    });
-    return { ...d, ...p };
+    return normalizeProgress(JSON.parse(raw) as Progress);
   } catch {
     return defaultProgress();
   }

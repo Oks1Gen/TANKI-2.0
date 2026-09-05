@@ -12,11 +12,17 @@ interface Props {
   setSetup: (s: Props['setup']) => void;
   onStart: () => void;
   onSetup: () => void;
+  account: string;
+  accounts: string[];
+  isAdmin: boolean;
+  onSwitchAccount: (name: string) => void;
+  onCreateAccount: () => void;
+  onDeleteAccount: () => void;
 }
 
 type Tab = 'stats' | 'upgrades' | 'camo';
 
-export default function Hangar({ progress, setProgress, setup, setSetup, onStart, onSetup }: Props) {
+export default function Hangar({ progress, setProgress, setup, setSetup, onStart, onSetup, account, accounts, isAdmin, onSwitchAccount, onCreateAccount, onDeleteAccount }: Props) {
   const [tab, setTab] = useState<Tab>('stats');
   const sel = progress.selectedTank;
   const tp = progress.tanks[sel];
@@ -86,6 +92,22 @@ export default function Hangar({ progress, setProgress, setup, setSetup, onStart
             <h1 className="text-3xl font-bold tracking-[0.25em] text-olive-200 leading-none glow-lime">СТАЛЬНОЙ ШТУРМ</h1>
             <div className="mono text-[10px] tracking-[0.3em] text-lime-dim mt-1">КОМАНДНЫЙ ПУНКТ · АНГАР 01 · ТАНКОВЫЙ ЭКШЕН</div>
           </div>
+        </div>
+        <div className="flex items-center gap-2">
+          {isAdmin && <span className="mono text-[10px] px-2 py-1 border border-amber text-amber tracking-[0.25em]">АДМИН</span>}
+          <select
+            value={account}
+            onChange={(e) => onSwitchAccount(e.target.value)}
+            onMouseEnter={() => audio.ui('hover')}
+            title="Аккаунт"
+            className="mono text-xs bg-olive-900 border border-olive-500/40 text-olive-200 px-2 py-1.5 outline-none cursor-pointer max-w-[140px]"
+          >
+            {accounts.map((a) => (
+              <option key={a} value={a}>{a}</option>
+            ))}
+          </select>
+          <button title="Новый аккаунт" onClick={onCreateAccount} onMouseEnter={() => audio.ui('hover')} className="chip !px-2">+</button>
+          {!isAdmin && <button title="Удалить аккаунт" onClick={onDeleteAccount} onMouseEnter={() => audio.ui('hover')} className="chip !px-2">×</button>}
         </div>
         <div className="flex items-center gap-4">
           <div className="mono text-[10px] text-olive-400 text-right leading-tight">

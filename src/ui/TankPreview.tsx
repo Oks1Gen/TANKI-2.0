@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { TankId, CamoId } from '../game/config';
-import { buildTank } from '../game/tankModel';
+import { TankId, CamoId, TANKS } from '../game/config';
+import { buildTank, TankModel } from '../game/tankModel';
+import { buildHangar, HangarRig } from '../game/hangar/hangarScene';
+import { audio } from '../game/audio';
 
 interface Props {
   tank: TankId;
@@ -9,102 +11,135 @@ interface Props {
   className?: string;
 }
 
+type PresetId = 'overview' | 'front' | 'side' | 'rear';
+
+const PRESETS: { id: PresetId; label: string; yaw: number; pitch: number; dist: number; auto: boolean }[] = [
+  { id: 'overview', label: 'Обзор', yaw: 0.6, pitch: 0.34, dist: 25, auto: true },
+  { id: 'front', label: 'Лоб', yaw: 0.05, pitch: 0.18, dist: 17, auto: false },
+  { id: 'side', label: 'Борт', yaw: Math.PI / 2, pitch: 0.22, dist: 19, auto: false },
+  { id: 'rear', label: 'Корма', yaw: Math.PI, pitch: 0.3, dist: 20, auto: false },
+];
+
+function disposeTankModel(model: TankModel) {
+  model.group.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (m.geometry) m.geometry.dispose();
+    // материалы/текстуры камо общие (кэш) — не трогаем
+  });
+}
+
+function standRows(tank: TankId): string[] {
+  const s = TANKS[tank];
+  return [
+    `ПРОЧНОСТЬ ${s.hp}`,
+    `УРОН ${s.damage} · КД ${s.reload}с`,
+    `СКОРОСТЬ ${Math.round(s.speed * 3.6)} км/ч`,
+    `РОЛЬ ${s.role.toUpperCase().slice(0, 22)}`,
+  ];
+}
+
 export default function TankPreview({ tank, camo, className }: Props) {
-  const ref = useRef<HTMLCanvasElement>(null);
-  const state = useRef({ yaw: 0.6, pitch: 0.25, dist: 22, drag: false, lx: 0, ly: 0, auto: true });
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
+  const rigRef = useRef<HangarRig | null>(null);
+  const tankRef = useRef<TankModel | null>(null);
+  const cam = useRef({
+    yaw: 0.6, pitch: 0.34, dist: 25,
+    tYaw: 0.6, tPitch: 0.34, tDist: 25,
+    drag: false, lx: 0, ly: 0,
+    auto: true, transitioning: false, idle: 0,
+  });
+  const [preset, setPreset] = useState<PresetId>('overview');
   const [sceneReady, setSceneReady] = useState(0);
 
-  // Смена модели без пересоздания рендерера
+  const applyPreset = (id: PresetId) => {
+    const p = PRESETS.find((x) => x.id === id)!;
+    const s = cam.current;
+    // кратчайший путь по yaw
+    let dy = (p.yaw - s.tYaw) % (Math.PI * 2);
+    if (dy > Math.PI) dy -= Math.PI * 2;
+    if (dy < -Math.PI) dy += Math.PI * 2;
+    s.tYaw = s.tYaw + dy;
+    s.tPitch = p.pitch;
+    s.tDist = p.dist;
+    s.auto = p.auto;
+    s.transitioning = true;
+    s.idle = 0;
+    setPreset(id);
+    audio.ui('click');
+  };
+
+  // Смена модели танка + табличка стенда
   useEffect(() => {
     const scene = sceneRef.current;
+    const rig = rigRef.current;
     if (!scene) return;
+    const old = tankRef.current;
+    if (old) {
+      scene.remove(old.group);
+      disposeTankModel(old);
+      tankRef.current = null;
+    }
     const model = buildTank(tank, camo, 0);
     model.group.position.y = 0.4;
     model.turret.rotation.y = 0.35;
     scene.add(model.group);
-    return () => {
-      scene.remove(model.group);
-      model.group.traverse((o) => {
-        const m = o as THREE.Mesh;
-        if (m.geometry) m.geometry.dispose();
-      });
-    };
+    tankRef.current = model;
+    rig?.setInfo(TANKS[tank].name, standRows(tank));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tank, camo, sceneReady]);
 
   useEffect(() => {
-    const canvas = ref.current!;
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    const canvas = canvasRef.current!;
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.08;
+    renderer.setClearColor(0x0b100c, 1);
+
     const scene = new THREE.Scene();
-    scene.fog = new THREE.FogExp2(0x0b100c, 0.02);
-    const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 200);
+    scene.fog = new THREE.FogExp2(0x0b100c, 0.013);
+    const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 220);
 
-    // ангар: пол и подсветка
-    const floorTex = (() => {
-      const c = document.createElement('canvas');
-      c.width = c.height = 256;
-      const x = c.getContext('2d')!;
-      x.fillStyle = '#141a15';
-      x.fillRect(0, 0, 256, 256);
-      x.strokeStyle = 'rgba(185,255,61,0.18)';
-      x.lineWidth = 2;
-      x.strokeRect(2, 2, 252, 252);
-      x.strokeStyle = 'rgba(185,255,61,0.06)';
-      for (let i = 0; i < 256; i += 32) {
-        x.beginPath(); x.moveTo(i, 0); x.lineTo(i, 256); x.stroke();
-        x.beginPath(); x.moveTo(0, i); x.lineTo(256, i); x.stroke();
-      }
-      const t = new THREE.CanvasTexture(c);
-      t.wrapS = t.wrapT = THREE.RepeatWrapping;
-      t.repeat.set(10, 10);
-      return t;
-    })();
-    const floor = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.6, metalness: 0.3 }));
-    floor.rotation.x = -Math.PI / 2;
-    floor.receiveShadow = true;
-    scene.add(floor);
-    const pad = new THREE.Mesh(new THREE.CylinderGeometry(9, 9.5, 0.4, 48), new THREE.MeshStandardMaterial({ color: 0x1e2a20, roughness: 0.5, metalness: 0.4 }));
-    pad.position.y = 0.2;
-    pad.receiveShadow = true;
-    scene.add(pad);
-    const ring = new THREE.Mesh(new THREE.RingGeometry(9.2, 9.6, 64), new THREE.MeshBasicMaterial({ color: 0xb9ff3d, transparent: true, opacity: 0.6, side: THREE.DoubleSide }));
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.y = 0.41;
-    scene.add(ring);
-
-    scene.add(new THREE.HemisphereLight(0x3a4c3a, 0x0a0d0a, 1.2));
-    const key = new THREE.DirectionalLight(0xfff2d8, 3);
-    key.position.set(14, 22, 10);
-    key.castShadow = true;
-    key.shadow.mapSize.set(1024, 1024);
-    key.shadow.camera.left = key.shadow.camera.bottom = -15;
-    key.shadow.camera.right = key.shadow.camera.top = 15;
-    scene.add(key);
-    const rim = new THREE.DirectionalLight(0xb9ff3d, 1.2);
-    rim.position.set(-12, 8, -14);
-    scene.add(rim);
-    const fill = new THREE.PointLight(0x4aa3ff, 40, 60);
-    fill.position.set(-10, 6, 10);
-    scene.add(fill);
-
+    const rig = buildHangar();
+    scene.add(rig.group);
     sceneRef.current = scene;
+    rigRef.current = rig;
 
-    const s = state.current;
-    const onDown = (e: PointerEvent) => { s.drag = true; s.auto = false; s.lx = e.clientX; s.ly = e.clientY; canvas.setPointerCapture(e.pointerId); };
+    const s = cam.current;
+    const onDown = (e: PointerEvent) => {
+      s.drag = true;
+      s.auto = false;
+      s.transitioning = false;
+      s.idle = 0;
+      s.lx = e.clientX;
+      s.ly = e.clientY;
+      canvas.setPointerCapture(e.pointerId);
+    };
     const onMove = (e: PointerEvent) => {
       if (!s.drag) return;
-      // Тянем влево (dx < 0) — модель поворачивается влево (grab-ощущение).
-      // Было `+=` — камера уходила в противоположную сторону, казалось инверсией.
-      s.yaw -= (e.clientX - s.lx) * 0.008;
-      s.pitch = Math.max(0.05, Math.min(1.2, s.pitch + (e.clientY - s.ly) * 0.006));
-      s.lx = e.clientX; s.ly = e.clientY;
+      const dx = (e.clientX - s.lx) * 0.008;
+      s.yaw -= dx;
+      s.tYaw -= dx;
+      const dp = (e.clientY - s.ly) * 0.006;
+      s.pitch = Math.max(0.05, Math.min(1.2, s.pitch + dp));
+      s.tPitch = s.pitch;
+      s.lx = e.clientX;
+      s.ly = e.clientY;
     };
-    const onUp = () => { s.drag = false; };
-    const onWheel = (e: WheelEvent) => { e.preventDefault(); s.dist = Math.max(10, Math.min(40, s.dist + e.deltaY * 0.02)); };
+    const onUp = () => {
+      s.drag = false;
+      s.idle = 0;
+    };
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      s.dist = Math.max(10, Math.min(42, s.dist + e.deltaY * 0.02));
+      s.tDist = s.dist;
+      s.transitioning = false;
+      s.idle = 0;
+    };
     canvas.addEventListener('pointerdown', onDown);
     canvas.addEventListener('pointermove', onMove);
     canvas.addEventListener('pointerup', onUp);
@@ -123,20 +158,44 @@ export default function TankPreview({ tank, camo, className }: Props) {
     const ro = new ResizeObserver(resize);
     ro.observe(canvas);
     resize();
+
     const loop = (now: number) => {
       raf = requestAnimationFrame(loop);
-      const dt = Math.min(0.1, (now - last) / 1000);
+      const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
-      if (s.auto) s.yaw += dt * 0.25;
-      camera.position.set(Math.sin(s.yaw) * Math.cos(s.pitch) * s.dist, Math.sin(s.pitch) * s.dist + 1, Math.cos(s.yaw) * Math.cos(s.pitch) * s.dist);
-      camera.lookAt(0, 2.2, 0);
-      ring.rotation.z += dt * 0.2;
+      const elapsed = now / 1000;
+      rig.update(dt, elapsed);
+
+      if (!s.drag) {
+        s.idle += dt;
+        if (s.transitioning) {
+          const k = 1 - Math.exp(-dt * 3.2);
+          s.yaw += (s.tYaw - s.yaw) * k;
+          s.pitch += (s.tPitch - s.pitch) * k;
+          s.dist += (s.tDist - s.dist) * k;
+          if (Math.abs(s.tYaw - s.yaw) < 0.002 && Math.abs(s.tDist - s.dist) < 0.02) s.transitioning = false;
+        } else if (s.auto) {
+          s.yaw += dt * 0.22;
+          s.tYaw = s.yaw;
+        } else if (s.idle > 6 && preset === 'overview') {
+          // вернулись к обзору — возобновляем вращение
+          s.auto = true;
+        }
+      }
+      camera.position.set(
+        Math.sin(s.yaw) * Math.cos(s.pitch) * s.dist,
+        Math.sin(s.pitch) * s.dist + 1,
+        Math.cos(s.yaw) * Math.cos(s.pitch) * s.dist,
+      );
+      camera.lookAt(0, 2.4, 0);
       renderer.render(scene, camera);
     };
     raf = requestAnimationFrame(loop);
     setSceneReady((v) => v + 1);
+
     return () => {
       sceneRef.current = null;
+      rigRef.current = null;
       cancelAnimationFrame(raf);
       ro.disconnect();
       canvas.removeEventListener('pointerdown', onDown);
@@ -144,13 +203,41 @@ export default function TankPreview({ tank, camo, className }: Props) {
       canvas.removeEventListener('pointerup', onUp);
       canvas.removeEventListener('pointerleave', onUp);
       canvas.removeEventListener('wheel', onWheel);
-      scene.traverse((o) => {
-        const m = o as THREE.Mesh;
-        if (m.geometry) m.geometry.dispose();
-      });
+      if (tankRef.current) {
+        disposeTankModel(tankRef.current);
+        tankRef.current = null;
+      }
+      rig.dispose();
       renderer.dispose();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return <canvas ref={ref} className={className} style={{ width: '100%', height: '100%', cursor: 'grab', touchAction: 'none' }} />;
+  return (
+    <div className={`relative w-full h-full overflow-hidden ${className ?? ''}`}>
+      <canvas ref={canvasRef} style={{ width: '100%', height: '100%', cursor: 'grab', touchAction: 'none' }} />
+      {/* виньетка для киношности */}
+      <div
+        className="absolute inset-0 pointer-events-none"
+        style={{ background: 'radial-gradient(ellipse at 50% 42%, transparent 55%, rgba(0,0,0,0.5) 100%)' }}
+      />
+      {/* пресеты камеры */}
+      <div className="absolute left-1/2 -translate-x-1/2 top-3 flex gap-1 pointer-events-auto">
+        {PRESETS.map((p) => (
+          <button
+            key={p.id}
+            onClick={() => applyPreset(p.id)}
+            onMouseEnter={() => audio.ui('hover')}
+            className={`mono text-[10px] tracking-[0.15em] uppercase px-3 py-1.5 border backdrop-blur-sm transition-all cursor-pointer ${
+              preset === p.id
+                ? 'border-lime text-lime bg-lime/10 shadow-[inset_0_0_12px_rgba(185,255,61,0.08)]'
+                : 'border-olive-500/40 text-olive-300 bg-olive-900/80 hover:border-olive-300/60 hover:text-olive-200'
+            }`}
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }

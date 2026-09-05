@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BattleConfig, BattleResult } from './game/config';
 import { GameEngine, HudSnapshot } from './game/engine';
-import { loadProgress, saveProgress, Progress } from './game/progress';
+import { Progress } from './game/progress';
+import { loadProfiles, saveProfiles, addAccount, removeAccount, Profiles, ADMIN_NAME } from './game/profiles';
 import { audio } from './game/audio';
 import Hangar from './ui/Hangar';
 import BattleSetup from './ui/BattleSetup';
@@ -26,14 +27,47 @@ function loadSetup(): Setup {
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('hangar');
-  const [progress, setProgressState] = useState<Progress>(() => loadProgress());
+  const [profiles, setProfiles] = useState<Profiles>(() => loadProfiles());
+  const progress = profiles.accounts[profiles.current];
   const [setup, setSetupState] = useState<Setup>(() => loadSetup());
   const [battleCfg, setBattleCfg] = useState<BattleConfig | null>(null);
   const [battleId, setBattleId] = useState(0);
 
   const setProgress = (p: Progress) => {
-    setProgressState(p);
-    saveProgress(p);
+    setProfiles((prev) => {
+      const next = { ...prev, accounts: { ...prev.accounts, [prev.current]: p } };
+      saveProfiles(next);
+      return next;
+    });
+  };
+
+  const switchAccount = (name: string) => {
+    if (!profiles.accounts[name] || name === profiles.current) return;
+    audio.ui('click');
+    setProfiles((prev) => {
+      const next = { ...prev, current: name };
+      saveProfiles(next);
+      return next;
+    });
+  };
+
+  const createAccount = () => {
+    const name = window.prompt('Название нового аккаунта:', `ИГРОК ${Object.keys(profiles.accounts).length}`);
+    if (name === null) return;
+    const next = addAccount(profiles, name);
+    if (!next) return audio.ui('deny');
+    audio.init();
+    audio.ui('confirm');
+    saveProfiles(next);
+    setProfiles(next);
+  };
+
+  const deleteAccount = () => {
+    const next = removeAccount(profiles, profiles.current);
+    if (!next) return audio.ui('deny');
+    audio.ui('click');
+    saveProfiles(next);
+    setProfiles(next);
   };
   const setSetup = (s: Setup) => {
     setSetupState(s);
@@ -60,7 +94,7 @@ export default function App() {
 
   return (
     <div className="w-screen h-screen bg-olive-950 text-olive-200 overflow-hidden">
-      {screen === 'hangar' && <Hangar progress={progress} setProgress={setProgress} setup={setup} setSetup={setSetup} onStart={startBattle} onSetup={() => setScreen('setup')} />}
+      {screen === 'hangar' && <Hangar progress={progress} setProgress={setProgress} setup={setup} setSetup={setSetup} onStart={startBattle} onSetup={() => setScreen('setup')} account={profiles.current} accounts={Object.keys(profiles.accounts)} isAdmin={profiles.current === ADMIN_NAME} onSwitchAccount={switchAccount} onCreateAccount={createAccount} onDeleteAccount={deleteAccount} />}
       {screen === 'setup' && <BattleSetup setup={setup} setSetup={setSetup} tank={progress.selectedTank} onBack={() => setScreen('hangar')} onStart={startBattle} />}
       {screen === 'battle' && battleCfg && (
         <Battle
