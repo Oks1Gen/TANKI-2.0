@@ -27,7 +27,7 @@ interface Props {
 
 type Tab = 'stats' | 'upgrades' | 'camo' | 'ranks';
 
-export default function Hangar({ progress, setProgress, setup, setSetup, onStart, onSetup, account, accounts, isAdmin, onSwitchAccount, onCreateAccount, onDeleteAccount, onExportSave, onImportSave }: Props) {
+export default function Hangar({ progress, setProgress, setup, setSetup, onStart: _onStart, onSetup, account, accounts, isAdmin, onSwitchAccount, onCreateAccount, onDeleteAccount, onExportSave, onImportSave }: Props) {
   const [tab, setTab] = useState<Tab>('stats');
   // жёсткая защита от битого прогресса — вместо белого экрана показываем фолбэк
   let sel: TankId = 't34';
@@ -262,40 +262,24 @@ export default function Hangar({ progress, setProgress, setup, setSetup, onStart
             <div>СТАТУС: <span className={tp.unlocked && !rankLockedSel ? 'text-lime' : 'text-amber'}>{rankLockedSel ? `НУЖНО ЗВАНИЕ «${rankNameForTank(sel).toUpperCase()}»` : tp.unlocked ? 'В СТРОЮ' : 'НЕ ОТКРЫТ'}</span></div>
             <div>ЗВАНИЕ: <span style={{ color: rank.color }}>{rank.badge} {rank.name.toUpperCase()}</span></div>
           </div>
-          {/* нижняя панель боя */}
-          <div className="absolute left-4 right-4 bottom-4 flex items-end justify-between gap-4">
-            <div className="panel p-3 flex-1">
-              <div className="panel-title mb-2">Режим боя</div>
-              <div className="flex gap-2 mb-3">
+          {/* нижняя панель боя: без ползунка ботов, кнопка В БОЙ по центру ведёт в настройку боя */}
+          <div className="absolute left-4 right-4 bottom-4 flex flex-col items-center gap-3">
+            <div className="panel px-4 py-2 flex items-center gap-3">
+              <span className="panel-title">Режим боя</span>
+              <div className="flex gap-2">
                 {(['deathmatch', 'capture'] as GameMode[]).map((m) => (
                   <Chip key={m} active={setup.mode === m} onClick={() => setSetup({ ...setup, mode: m })}>
                     {MODE_NAMES[m]}
                   </Chip>
                 ))}
               </div>
-              <div className="flex items-center gap-3">
-                <span className="mono text-[10px] text-olive-300 tracking-wider uppercase">Боты</span>
-                <input
-                  type="range"
-                  min={1}
-                  max={12}
-                  value={setup.bots}
-                  onChange={(e) => setSetup({ ...setup, bots: +e.target.value })}
-                  className="flex-1 accent-lime"
-                />
-                <span className="mono text-lime font-bold w-6 text-right">{setup.bots}</span>
-              </div>
-              <div className="mono text-[10px] text-olive-400 mt-2">
+              <span className="mono text-[10px] text-olive-400">
                 {BIOME_NAMES[setup.biome]} · {TIME_NAMES[setup.time]} · {WEATHER_NAMES[setup.weather]}
-                {setup.mode === 'capture' && ` · союзников: ${setup.bots - Math.ceil((setup.bots + 1) / 2)}, врагов: ${Math.ceil((setup.bots + 1) / 2)}`}
-              </div>
+              </span>
             </div>
-            <div className="flex flex-col gap-2">
-              <Btn onClick={onSetup}>Настройка боя</Btn>
-              <Btn variant="primary" className="text-lg !py-3 !px-8" disabled={!tp.unlocked || rankLockedSel} title={rankLockedSel ? `Нужно звание «${rankNameForTank(sel)}»` : undefined} onClick={onStart}>
-                ▶ Начать бой
-              </Btn>
-            </div>
+            <Btn variant="primary" className="text-xl !py-3 !px-16" disabled={!tp.unlocked || rankLockedSel} title={rankLockedSel ? `Нужно звание «${rankNameForTank(sel)}»` : undefined} onClick={onSetup}>
+              В БОЙ
+            </Btn>
           </div>
         </div>
 
