@@ -1,4 +1,4 @@
-import { ReactNode } from 'react';
+import { ReactNode, MouseEvent } from 'react';
 import { audio } from '../game/audio';
 
 export function Panel({ title, children, className = '', right }: { title?: string; children: ReactNode; className?: string; right?: ReactNode }) {
@@ -18,18 +18,21 @@ export function Panel({ title, children, className = '', right }: { title?: stri
   );
 }
 
-export function Btn({ children, onClick, variant = 'default', className = '', disabled, title }: { children: ReactNode; onClick?: () => void; variant?: 'default' | 'primary' | 'danger'; className?: string; disabled?: boolean; title?: string }) {
+export function Btn({ children, onClick, variant = 'default', className = '', disabled, title }: { children: ReactNode; onClick?: (e: MouseEvent) => void; variant?: 'default' | 'primary' | 'danger'; className?: string; disabled?: boolean; title?: string }) {
   return (
     <button
       title={title}
       disabled={disabled}
       className={`btn ${variant === 'primary' ? 'btn-primary' : variant === 'danger' ? 'btn-danger' : ''} ${className}`}
       onMouseEnter={() => !disabled && audio.ui('hover')}
-      onClick={() => {
+      onClick={(e) => {
+        // Кнопка часто вложена в кликабельную карточку (выбор танка):
+        // без stopPropagation клик всплывает и вторым setProgress затирает unlock.
+        e.stopPropagation();
         if (disabled) return;
         audio.init();
         audio.ui(variant === 'primary' ? 'confirm' : 'click');
-        onClick?.();
+        onClick?.(e);
       }}
     >
       {children}

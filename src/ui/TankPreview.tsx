@@ -97,7 +97,9 @@ export default function TankPreview({ tank, camo, className }: Props) {
     const onDown = (e: PointerEvent) => { s.drag = true; s.auto = false; s.lx = e.clientX; s.ly = e.clientY; canvas.setPointerCapture(e.pointerId); };
     const onMove = (e: PointerEvent) => {
       if (!s.drag) return;
-      s.yaw += (e.clientX - s.lx) * 0.008;
+      // Тянем влево (dx < 0) — модель поворачивается влево (grab-ощущение).
+      // Было `+=` — камера уходила в противоположную сторону, казалось инверсией.
+      s.yaw -= (e.clientX - s.lx) * 0.008;
       s.pitch = Math.max(0.05, Math.min(1.2, s.pitch + (e.clientY - s.ly) * 0.006));
       s.lx = e.clientX; s.ly = e.clientY;
     };
