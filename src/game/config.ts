@@ -167,6 +167,34 @@ export const BIOMES: Biome[] = ['forest', 'desert', 'winter', 'mountains'];
 export const TIMES: TimeOfDay[] = ['night', 'dawn', 'morning', 'day', 'noon', 'evening', 'sunset', 'dusk'];
 export const WEATHERS: Weather[] = ['clear', 'rain', 'fog', 'snow', 'storm'];
 
+// ===== Сложность ботов =====
+export type BotDifficulty = 'recruit' | 'veteran' | 'elite';
+
+export const BOT_DIFFICULTIES: BotDifficulty[] = ['recruit', 'veteran', 'elite'];
+
+export const BOT_DIFFICULTY_NAMES: Record<BotDifficulty, string> = {
+  recruit: 'Рекрут',
+  veteran: 'Ветеран',
+  elite: 'Элита',
+};
+
+export interface BotDifficultySpec {
+  desc: string;
+  skillMin: number;
+  skillMax: number;
+  reloadMul: number; // >1 — боты стреляют реже
+  hpMul: number;
+  damageMul: number;
+  lvlMin: number;
+  lvlMax: number;
+}
+
+export const BOT_DIFFICULTY_SPECS: Record<BotDifficulty, BotDifficultySpec> = {
+  recruit: { desc: 'Мажут, медленная перезарядка, меньше прочности', skillMin: 0.28, skillMax: 0.5, reloadMul: 1.3, hpMul: 0.9, damageMul: 0.85, lvlMin: 0, lvlMax: 0 },
+  veteran: { desc: 'Обычный бой, как раньше', skillMin: 0.45, skillMax: 0.75, reloadMul: 1.0, hpMul: 1.0, damageMul: 1.0, lvlMin: 0, lvlMax: 2 },
+  elite: { desc: 'Точно бьют с упреждением, быстрее и живучее', skillMin: 0.75, skillMax: 0.95, reloadMul: 0.85, hpMul: 1.15, damageMul: 1.1, lvlMin: 1, lvlMax: 2 },
+};
+
 export interface BattleConfig {
   mode: GameMode;
   biome: Biome;
@@ -174,6 +202,8 @@ export interface BattleConfig {
   weather: Weather;
   duration: Duration;
   bots: number;
+  /** опционально для совместимости со старыми сейвами/тестами — движок считает 'veteran' */
+  botDifficulty?: BotDifficulty;
   tank: TankId;
   camo: CamoId;
   upgrades: Record<UpgradeId, number>;
@@ -214,12 +244,22 @@ export interface EffectiveStats {
 
 export function computeStats(id: TankId, up: Record<UpgradeId, number>, goldUpgrade: boolean): EffectiveStats {
   const s = TANKS[id];
-  const ammoMul = 1 + up.ammo * 0.1;
-  let damage = s.damage * (1 + up.gun * 0.06);
+  // защита от битого localStorage / ручного редактирования: клампим уровни 0..5
+  const lvl = (k: UpgradeId) => {
+    const v = up?.[k];
+    if (!Number.isFinite(v)) return 0;
+    return Math.max(0, Math.min(5, Math.floor(v)));
+  };
+  const gun = lvl('gun'), engine = lvl('engine'), armor = lvl('armor');
+  const sight = lvl('sight'), ammo = lvl('ammo'), suspension = lvl('suspension');
+  const ammoMul = 1 + ammo * 0.1;
+  let damage = s.damage * (1 + gun * 0.06);
   let shellSpeed = s.shellSpeed;
   let magazine = 1;
   let magazineReload = 0;
-  let reload = s.reload * (1 - up.ammo * 0.05);
+  let reload = s.reload * (1 - ammo * 0.05);
+  // reload никогда не ниже 30% базы — иначе пулемёт из битого сейва
+  reload = Math.max(s.reload * 0.3, reload);
   if (goldUpgrade) {
     if (s.goldUpgrade.kind === 'heavygun') {
       damage *= 1.22;
@@ -231,12 +271,12 @@ export function computeStats(id: TankId, up: Record<UpgradeId, number>, goldUpgr
     }
   }
   return {
-    hp: Math.round(s.hp * (1 + up.armor * 0.07)),
-    speed: s.speed * (1 + up.engine * 0.05),
-    reverseSpeed: s.reverseSpeed * (1 + up.engine * 0.05),
-    accel: s.accel * (1 + up.engine * 0.04),
-    hullTurn: s.hullTurn * (1 + up.suspension * 0.07),
-    turretTurn: s.turretTurn * (1 + up.sight * 0.08),
+    hp: Math.round(s.hp * (1 + armor * 0.07)),
+    speed: s.speed * (1 + engine * 0.05),
+    reverseSpeed: s.reverseSpeed * (1 + engine * 0.05),
+    accel: s.accel * (1 + engine * 0.04),
+    hullTurn: s.hullTurn * (1 + suspension * 0.07),
+    turretTurn: s.turretTurn * (1 + sight * 0.08),
     reload,
     damage: Math.round(damage),
     shellSpeed,

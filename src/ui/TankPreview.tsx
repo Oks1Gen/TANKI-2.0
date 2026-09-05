@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { TankId, CamoId, TANKS } from '../game/config';
-import { buildTank, TankModel } from '../game/tankModel';
+import { buildTank, TankModel, disposeTankModel } from '../game/tankModel';
 import { buildHangar, HangarRig } from '../game/hangar/hangarScene';
+import { getWebGLStatus } from '../game/webgl';
 import { audio } from '../game/audio';
 
 interface Props {
@@ -20,14 +21,6 @@ const PRESETS: { id: PresetId; label: string; yaw: number; pitch: number; dist: 
   { id: 'rear', label: 'Корма', yaw: Math.PI, pitch: 0.3, dist: 20, auto: false },
 ];
 
-function disposeTankModel(model: TankModel) {
-  model.group.traverse((o) => {
-    const m = o as THREE.Mesh;
-    if (m.geometry) m.geometry.dispose();
-    // материалы/текстуры камо общие (кэш) — не трогаем
-  });
-}
-
 function standRows(tank: TankId): string[] {
   const s = TANKS[tank];
   return [
@@ -36,6 +29,14 @@ function standRows(tank: TankId): string[] {
     `СКОРОСТЬ ${Math.round(s.speed * 3.6)} км/ч`,
     `РОЛЬ ${s.role.toUpperCase().slice(0, 22)}`,
   ];
+}
+
+function disposePreviewModel(model: TankModel) {
+  try {
+    disposeTankModel(model);
+  } catch {
+    /* */
+  }
 }
 
 export default function TankPreview({ tank, camo, className }: Props) {
@@ -50,7 +51,9 @@ export default function TankPreview({ tank, camo, className }: Props) {
     auto: true, transitioning: false, idle: 0,
   });
   const [preset, setPreset] = useState<PresetId>('overview');
+  const presetRef = useRef<PresetId>('overview');
   const [sceneReady, setSceneReady] = useState(0);
+  const [failed, setFailed] = useState<string | null>(null);
 
   const applyPreset = (id: PresetId) => {
     const p = PRESETS.find((x) => x.id === id)!;
@@ -65,6 +68,7 @@ export default function TankPreview({ tank, camo, className }: Props) {
     s.auto = p.auto;
     s.transitioning = true;
     s.idle = 0;
+    presetRef.current = id;
     setPreset(id);
     audio.ui('click');
   };
@@ -77,10 +81,16 @@ export default function TankPreview({ tank, camo, className }: Props) {
     const old = tankRef.current;
     if (old) {
       scene.remove(old.group);
-      disposeTankModel(old);
+      disposePreviewModel(old);
       tankRef.current = null;
     }
-    const model = buildTank(tank, camo, 0);
+    let model: TankModel | null = null;
+    try {
+      model = buildTank(tank, camo, 0);
+    } catch (e) {
+      console.error('[preview] buildTank failed', e);
+      return;
+    }
     model.group.position.y = 0.4;
     model.turret.rotation.y = 0.35;
     scene.add(model.group);
@@ -90,8 +100,50 @@ export default function TankPreview({ tank, camo, className }: Props) {
   }, [tank, camo, sceneReady]);
 
   useEffect(() => {
-    const canvas = canvasRef.current!;
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    let canvas = canvasRef.current!;
+    if (!canvas) return;
+    // ранняя диагностика: если WebGL2 нет вообще — сразу понятный текст, а не исключение three.js
+    try {
+      const st = getWebGLStatus();
+      if (!st.ok) {
+        setFailed((st.error ?? 'WebGL недоступен') + (st.hint ? ' ' + st.hint : ''));
+        return;
+      }
+    } catch {
+      /* идём дальше — renderer сам бросит понятную ошибку */
+    }
+    // ВАЖНО: не вызываем canvas.getContext('webgl2') для проверки —
+    // это создаёт контекст с дефолтными атрибутами, и последующий
+    // new THREE.WebGLRenderer({ canvas, antialias: true }) получит
+    // mismatch атрибутов. Проверяем WebGL через отдельный canvas
+    // (getWebGLStatus выше), а битый контекст лечим retry ниже.
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    } catch (e) {
+      // одна попытка восстановления: свежий canvas вместо отравленного
+      try {
+        const fresh = document.createElement('canvas');
+        fresh.setAttribute('style', 'width:100%;height:100%;cursor:grab;touch-action:none');
+        canvas.replaceWith(fresh);
+        canvasRef.current = fresh;
+        canvas = fresh;
+        renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+      } catch (e2) {
+        console.error('[preview] WebGL init failed', e2);
+        setFailed(e2 instanceof Error ? e2.message : 'WebGL недоступен');
+        return;
+      }
+    }
+    let rig: HangarRig;
+    try {
+      rig = buildHangar();
+    } catch (e) {
+      console.error('[preview] buildHangar failed', e);
+      setFailed(e instanceof Error ? e.message : 'Не удалось построить ангар');
+      try { renderer.dispose(); } catch { /* */ }
+      return;
+    }
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -103,7 +155,6 @@ export default function TankPreview({ tank, camo, className }: Props) {
     scene.fog = new THREE.FogExp2(0x0b100c, 0.013);
     const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 220);
 
-    const rig = buildHangar();
     scene.add(rig.group);
     sceneRef.current = scene;
     rigRef.current = rig;
@@ -177,7 +228,7 @@ export default function TankPreview({ tank, camo, className }: Props) {
         } else if (s.auto) {
           s.yaw += dt * 0.22;
           s.tYaw = s.yaw;
-        } else if (s.idle > 6 && preset === 'overview') {
+        } else if (s.idle > 6 && presetRef.current === 'overview') {
           // вернулись к обзору — возобновляем вращение
           s.auto = true;
         }
@@ -204,11 +255,14 @@ export default function TankPreview({ tank, camo, className }: Props) {
       canvas.removeEventListener('pointerleave', onUp);
       canvas.removeEventListener('wheel', onWheel);
       if (tankRef.current) {
-        disposeTankModel(tankRef.current);
+        disposePreviewModel(tankRef.current);
         tankRef.current = null;
       }
       rig.dispose();
       renderer.dispose();
+      // ВАЖНО: без forceContextLoss() — он убивает контекст самого canvas,
+      // и повторный mount на том же canvas (StrictMode в dev) падает с
+      // "Cannot read properties of null (reading 'precision')".
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -216,6 +270,17 @@ export default function TankPreview({ tank, camo, className }: Props) {
   return (
     <div className={`relative w-full h-full overflow-hidden ${className ?? ''}`}>
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%', cursor: 'grab', touchAction: 'none' }} />
+      {failed && (
+        <div className="absolute inset-0 flex items-center justify-center bg-olive-950/85 p-4 text-center overflow-auto">
+          <div className="mono text-[11px] text-olive-300 leading-relaxed max-w-[420px]">
+            3D-предпросмотр недоступен
+            <br />
+            <span className="text-olive-400 break-words">{failed}</span>
+            <br />
+            <span className="text-olive-400">Проверьте: 1) другой браузер (Chrome/Edge), 2) аппаратное ускорение включено, 3) https://get.webgl.org/ показывает куб.</span>
+          </div>
+        </div>
+      )}
       {/* виньетка для киношности */}
       <div
         className="absolute inset-0 pointer-events-none"

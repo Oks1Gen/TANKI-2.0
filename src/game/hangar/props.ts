@@ -446,7 +446,9 @@ export function buildLamps(t: HangarTextures) {
   return { group: g, lights, bulbs, glows };
 }
 
-/** Фоновая техника: 2 танка в глубине, один под брезентом */
+/** Фоновая техника: 2 танка в глубине, один под брезентом.
+ *  Возвращает и группу, и модели — модели надо освобождать через
+ *  disposeTankModel (их материалы без userData.own, общий traverse их не берёт). */
 export function buildBackgroundTanks(t: HangarTextures) {
   const g = new THREE.Group();
   const left = buildTank('t34', 'forest', 0, false);
@@ -481,7 +483,7 @@ export function buildBackgroundTanks(t: HangarTextures) {
   const j1 = box(0.5, 1.2, 0.5, jackM, -17.5 + 2.2, 0.6, -13.5 + 2);
   const j2 = box(0.5, 1.2, 0.5, jackM, -17.5 + 2.2, 0.6, -13.5 - 2);
   g.add(j1, j2);
-  return g;
+  return { group: g, models: [left, right] };
 }
 
 /** Сварочный угол: ширмы + искры + синий свет */

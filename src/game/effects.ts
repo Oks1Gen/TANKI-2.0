@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { Weather } from './config';
 
 // ================== Частицы (единый Points-буфер) ==================
+const SCRATCH_COLOR = new THREE.Color();
+
 export class ParticleSystem {
   readonly cap: number;
   private pos: Float32Array;
@@ -17,6 +19,7 @@ export class ParticleSystem {
   private geo: THREE.BufferGeometry;
   points: THREE.Points;
   private cursor = 0;
+  private colorDirty = true;
 
   constructor(cap = 3000) {
     this.cap = cap;
@@ -65,7 +68,7 @@ export class ParticleSystem {
 
   emit(o: { x: number; y: number; z: number; vx?: number; vy?: number; vz?: number; spread?: number; color: number; life: number; size: number; grow?: number; gravity?: number; drag?: number; alpha?: number; count?: number; colorVar?: number }) {
     const n = o.count ?? 1;
-    const c = new THREE.Color(o.color);
+    const c = SCRATCH_COLOR.setHex(o.color);
     for (let k = 0; k < n; k++) {
       const i = this.cursor;
       this.cursor = (this.cursor + 1) % this.cap;
@@ -89,15 +92,21 @@ export class ParticleSystem {
       this.drag[i] = o.drag ?? 0;
       this.alpha[i] = o.alpha ?? 1;
     }
+    this.colorDirty = true;
   }
 
   update(dt: number) {
     const { pos, vel, life, maxLife, size, grow, grav, drag, alpha } = this;
+    let anyAlive = false;
     for (let i = 0; i < this.cap; i++) {
       if (life[i] <= 0) {
-        alpha[i] = 0;
+        // мёртвая частица обязана иметь size=0, иначе она всё равно растеризуется
+        // (прозрачный квад во весь экран × 2500 штук — жрёт fill-rate)
+        if (alpha[i] !== 0) alpha[i] = 0;
+        if (size[i] !== 0) size[i] = 0;
         continue;
       }
+      anyAlive = true;
       life[i] -= dt;
       const t = life[i] / maxLife[i];
       const d = 1 - drag[i] * dt;
@@ -114,8 +123,13 @@ export class ParticleSystem {
       size[i] += grow[i] * dt;
       alpha[i] = Math.min(1, t * 2) * (life[i] > 0 ? 1 : 0);
     }
+    if (!anyAlive) return;
     this.geo.attributes.position.needsUpdate = true;
-    this.geo.attributes.aColor.needsUpdate = true;
+    // цвет статичен между emit — не гоняем 3 floats на частицу каждый кадр
+    if (this.colorDirty) {
+      this.geo.attributes.aColor.needsUpdate = true;
+      this.colorDirty = false;
+    }
     this.geo.attributes.aSize.needsUpdate = true;
     this.geo.attributes.aAlpha.needsUpdate = true;
   }
@@ -142,12 +156,14 @@ export class DebrisSystem {
   private pool: Debris[] = [];
   private geo = new THREE.BoxGeometry(1, 1, 1);
   private mat = new THREE.MeshStandardMaterial({ color: 0x2a2a28, roughness: 0.9, metalness: 0.4 });
+  private coloredMats = new Map<number, THREE.MeshStandardMaterial>();
   private cursor = 0;
   constructor(private scene: THREE.Scene, count = 60) {
     for (let i = 0; i < count; i++) {
       const m = new THREE.Mesh(this.geo, this.mat);
       m.visible = false;
-      m.castShadow = true;
+      m.castShadow = false; // мелкий мусор не должен удваивать shadow-pass
+      m.receiveShadow = false;
       scene.add(m);
       this.pool.push({ mesh: m, vx: 0, vy: 0, vz: 0, rx: 0, ry: 0, life: 0, active: false });
     }
@@ -162,7 +178,12 @@ export class DebrisSystem {
       d.mesh.scale.set((0.3 + Math.random() * 0.7) * scale, (0.2 + Math.random() * 0.5) * scale, (0.3 + Math.random() * 0.9) * scale);
       d.mesh.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
       if (color !== undefined) {
-        d.mesh.material = new THREE.MeshStandardMaterial({ color, roughness: 0.9 });
+        let m = this.coloredMats.get(color);
+        if (!m) {
+          m = new THREE.MeshStandardMaterial({ color, roughness: 0.9 });
+          this.coloredMats.set(color, m);
+        }
+        d.mesh.material = m;
       } else d.mesh.material = this.mat;
       const a = Math.random() * Math.PI * 2;
       const sp = power * (0.4 + Math.random() * 0.8);
@@ -203,6 +224,8 @@ export class DebrisSystem {
   dispose() {
     this.geo.dispose();
     this.mat.dispose();
+    this.coloredMats.forEach((m) => m.dispose());
+    this.coloredMats.clear();
     this.pool.forEach((d) => this.scene.remove(d.mesh));
   }
 }
@@ -253,7 +276,7 @@ export class WeatherSystem {
   constructor(private scene: THREE.Scene, weather: Weather) {
     this.kind = weather;
     if (weather === 'rain' || weather === 'storm') {
-      this.n = weather === 'storm' ? 1800 : 1100;
+      this.n = weather === 'storm' ? 900 : 600;
       const pos = new Float32Array(this.n * 6);
       const geo = new THREE.BufferGeometry();
       for (let i = 0; i < this.n; i++) {
@@ -267,7 +290,7 @@ export class WeatherSystem {
       this.obj = new THREE.LineSegments(geo, mat);
       this.positions = pos;
     } else if (weather === 'snow') {
-      this.n = 1400;
+      this.n = 700;
       const pos = new Float32Array(this.n * 3);
       this.speeds = new Float32Array(this.n);
       for (let i = 0; i < this.n; i++) {

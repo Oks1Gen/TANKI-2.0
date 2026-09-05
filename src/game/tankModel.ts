@@ -1,5 +1,32 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { TankId, TANKS, CamoId, CAMOS } from './config';
+
+// Клон геометрии с трансформацией — для merge статических деталей (меньше draw calls)
+const _te = new THREE.Euler();
+const _tq = new THREE.Quaternion();
+const _tp = new THREE.Vector3();
+const _ts = new THREE.Vector3();
+const _tm = new THREE.Matrix4();
+function txg(geo: THREE.BufferGeometry, x: number, y: number, z: number, ry = 0, sx = 1, sy = 1, sz = 1, rx = 0, rz = 0): THREE.BufferGeometry {
+  const g = geo.clone();
+  _te.set(rx, ry, rz);
+  _tq.setFromEuler(_te);
+  _tp.set(x, y, z);
+  _ts.set(sx, sy, sz);
+  _tm.compose(_tp, _tq, _ts);
+  g.applyMatrix4(_tm);
+  return g;
+}
+
+function tmerged(parts: THREE.BufferGeometry[], mat: THREE.Material, castShadow: boolean): THREE.Mesh | null {
+  if (!parts.length) return null;
+  const geo = mergeGeometries(parts, false)!;
+  for (const p of parts) p.dispose();
+  const m = new THREE.Mesh(geo, mat);
+  m.castShadow = castShadow;
+  return m;
+}
 
 export interface TankModel {
   group: THREE.Group;
@@ -9,8 +36,103 @@ export interface TankModel {
   muzzle: THREE.Object3D;
   wheels: THREE.Mesh[];
   headlights: THREE.SpotLight[];
+  headCones: THREE.Mesh[];
   lightMeshes: THREE.Mesh[];
   bodyMats: THREE.MeshStandardMaterial[];
+}
+
+// Общая геометрия луча фар (одна на все танки — не создавать на каждый танк)
+let sharedBeamGeo: THREE.CylinderGeometry | null = null;
+function getBeamGeo(): THREE.CylinderGeometry {
+  if (!sharedBeamGeo) sharedBeamGeo = new THREE.CylinderGeometry(4.2, 0.32, 28, 12, 1, true);
+  // геометрия могла быть задиспоузена агрессивным traverse — пересоздаём при необходимости
+  return sharedBeamGeo;
+}
+
+export function isSharedBeamGeo(g: THREE.BufferGeometry | undefined | null): boolean {
+  return !!g && g === sharedBeamGeo;
+}
+
+// Сгоревший остов — один общий материал на все танки, иначе утечка на каждый kill
+let sharedBurntMat: THREE.MeshStandardMaterial | null = null;
+function getBurntMat(): THREE.MeshStandardMaterial {
+  if (!sharedBurntMat) sharedBurntMat = new THREE.MeshStandardMaterial({ color: 0x1a1a18, roughness: 1, metalness: 0.2 });
+  return sharedBurntMat;
+}
+
+/** Корректное освобождение модели танка: геометрия + собственные материалы.
+ *  Общую beam-геометрию и кэшированные camo-текстуры не трогаем. */
+export function disposeTankModel(model: TankModel) {
+  const burnt = sharedBurntMat;
+  model.group.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m || !(m as THREE.Mesh).isMesh) return;
+    const mesh = m as THREE.Mesh;
+    if (mesh.geometry && !isSharedBeamGeo(mesh.geometry as THREE.BufferGeometry)) {
+      try { mesh.geometry.dispose(); } catch { /* */ }
+    }
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const mat of mats) {
+      if (!mat || mat === burnt) continue;
+      const sm = mat as THREE.MeshStandardMaterial & { map?: THREE.Texture | null };
+      // camo-текстуры из кэша — общие, их не диспоузим
+      let isCachedTex = false;
+      if (sm.map) {
+        for (const cached of camoTexCache.values()) {
+          if (cached === sm.map) { isCachedTex = true; break; }
+        }
+      }
+      // beam ShaderMaterial — собственный, диспоузим
+      try { mat.dispose(); } catch { /* */ }
+      void isCachedTex;
+    }
+  });
+}
+
+// Мягкий рассеянный луч: альфа гаснет к силуэту (нет оконтовки) и к концам.
+// uOpacity задаёт яркость (engine меняет через setBeamOpacity).
+export function makeBeamMaterial(): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    uniforms: {
+      uColor: { value: new THREE.Color(0xffdf9e) },
+      uOpacity: { value: 0 },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      varying vec3 vNormal;
+      varying vec3 vViewDir;
+      void main() {
+        vUv = uv;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vNormal = normalize(normalMatrix * normal);
+        vViewDir = normalize(-mv.xyz);
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: `
+      uniform vec3 uColor;
+      uniform float uOpacity;
+      varying vec2 vUv;
+      varying vec3 vNormal;
+      varying vec3 vViewDir;
+      void main() {
+        float ndv = abs(dot(normalize(vNormal), normalize(vViewDir)));
+        float edge = pow(ndv, 1.8); // к краю конуса -> 0, оконтовки нет
+        float head = smoothstep(0.0, 0.22, vUv.y); // мягкое появление у фары
+        float tail = 1.0 - smoothstep(0.55, 1.0, vUv.y); // сход на нет к концу
+        float a = uOpacity * edge * head * tail;
+        if (a < 0.0015) discard;
+        gl_FragColor = vec4(uColor, a);
+      }`,
+  });
+}
+
+export function setBeamOpacity(mesh: THREE.Mesh, v: number) {
+  const m = mesh.material as THREE.ShaderMaterial;
+  if (m && m.uniforms && m.uniforms.uOpacity) m.uniforms.uOpacity.value = v;
 }
 
 const camoTexCache = new Map<string, THREE.Texture>();
@@ -78,9 +200,17 @@ export function buildTank(id: TankId, camo: CamoId, team: number, withLights = t
   const trackH = H * 0.75;
   const trackW = W * 0.22;
   const groundClear = 0.45;
+  const hullW = W - trackW * 2 + 0.2;
+  const hullY = groundClear + trackH * 0.4;
 
   // ---- Гусеницы ----
+  // Колёса крутятся (динамика), всё остальное статично и смержено:
+  // ступицы+выхлоп+ЗИП — 1 меш, надгусеничные полки+надстройка — 1 меш (было ~20 draw calls)
   const wheels: THREE.Mesh[] = [];
+  const hubParts: THREE.BufferGeometry[] = [];
+  const hubGeo = new THREE.CylinderGeometry(1, 1, 1, 8);
+  const n = id === 'e100' ? 7 : id === 't34' ? 5 : 6;
+  const wr = trackH * 0.42;
   for (const side of [-1, 1]) {
     const tx = side * (W / 2 - trackW / 2);
     const track = new THREE.Mesh(new THREE.BoxGeometry(trackW, trackH, L * 0.98), trackMat);
@@ -88,59 +218,77 @@ export function buildTank(id: TankId, camo: CamoId, team: number, withLights = t
     track.castShadow = true;
     track.receiveShadow = true;
     hull.add(track);
-    // защитный экран сверху
-    const fender = new THREE.Mesh(new THREE.BoxGeometry(trackW * 1.15, 0.12, L), bodyMat2);
-    fender.position.set(tx, groundClear + trackH + 0.06, 0);
-    hull.add(fender);
-    // катки
-    const n = id === 'e100' ? 7 : id === 't34' ? 5 : 6;
-    const wr = trackH * 0.42;
     for (let i = 0; i < n; i++) {
       const z = -L * 0.4 + (i / (n - 1)) * L * 0.8;
       const wheel = new THREE.Mesh(new THREE.CylinderGeometry(wr, wr, trackW * 1.08, 14), wheelMat);
       wheel.rotation.z = Math.PI / 2;
       wheel.position.set(tx, groundClear + wr, z);
-      wheel.castShadow = true;
+      // катки/ступицы мелкие — тени от них не видно, а в shadow-pass это ~24 draw на танк
+      wheel.castShadow = false;
       hull.add(wheel);
       wheels.push(wheel);
-      const hub = new THREE.Mesh(new THREE.CylinderGeometry(wr * 0.4, wr * 0.4, trackW * 1.12, 8), darkMat);
-      hub.rotation.z = Math.PI / 2;
-      hub.position.copy(wheel.position);
-      hull.add(hub);
+      hubParts.push(txg(hubGeo, tx, groundClear + wr, z, 0, wr * 0.4, trackW * 1.12, wr * 0.4, 0, Math.PI / 2));
     }
   }
+  hubGeo.dispose();
+  // выхлопные трубы + ящик ЗИП — в тот же тёмный merge (статичны относительно корпуса)
+  const exGeo = new THREE.CylinderGeometry(0.16, 0.16, 0.9, 8);
+  for (const side of [-1, 1]) {
+    hubParts.push(txg(exGeo, side * W * 0.25, hullY + H * 0.8, -L * 0.5, 0, 1, 1, 1, Math.PI / 2));
+  }
+  exGeo.dispose();
+  const zipGeo = new THREE.BoxGeometry(W * 0.3, 0.35, 0.9);
+  hubParts.push(txg(zipGeo, -W * 0.3, hullY + H * 1.45, -L * 0.3));
+  zipGeo.dispose();
+  const hullDark = tmerged(hubParts, darkMat, false);
+  if (hullDark) hull.add(hullDark);
 
   // ---- Корпус ----
-  const hullW = W - trackW * 2 + 0.2;
-  const hullY = groundClear + trackH * 0.4;
   const body = new THREE.Mesh(new THREE.BoxGeometry(hullW, H, L), bodyMat);
   body.position.set(0, hullY + H / 2, 0);
   body.castShadow = true;
   body.receiveShadow = true;
   hull.add(body);
-  // верхняя надстройка / лобовая плита
+  // надгусеничные полки + верхняя надстройка — один меш (было 3 draw calls)
+  const upParts: THREE.BufferGeometry[] = [];
+  const fenderGeo = new THREE.BoxGeometry(trackW * 1.15, 0.12, L);
+  for (const side of [-1, 1]) {
+    upParts.push(txg(fenderGeo, side * (W / 2 - trackW / 2), groundClear + trackH + 0.06, 0));
+  }
+  fenderGeo.dispose();
   const upperGeo = new THREE.BoxGeometry(W * 0.98, H * 0.45, L * 0.7);
-  const upper = new THREE.Mesh(upperGeo, bodyMat2);
-  upper.position.set(0, hullY + H + H * 0.2, -L * 0.05);
-  upper.castShadow = true;
-  hull.add(upper);
+  upParts.push(txg(upperGeo, 0, hullY + H + H * 0.2, -L * 0.05));
+  upperGeo.dispose();
+  const upperMerged = tmerged(upParts, bodyMat2, true);
+  if (upperMerged) hull.add(upperMerged);
   // наклонный лоб
   const glacis = new THREE.Mesh(new THREE.BoxGeometry(W * 0.96, 0.25, H * 1.1), bodyMat);
   glacis.position.set(0, hullY + H * 0.95, L * 0.4);
   glacis.rotation.x = id === 't34' ? -0.95 : -0.75;
-  glacis.castShadow = true;
+  glacis.castShadow = false;
   hull.add(glacis);
-  // фары
+  // фары + мягкие рассеянные конусы (волюметрик без стоимости света)
   const headlights: THREE.SpotLight[] = [];
+  const headCones: THREE.Mesh[] = [];
   const lightMeshes: THREE.Mesh[] = [];
+  const beamGeo = getBeamGeo();
   for (const side of [-1, 1]) {
     const lm = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.25, 0.25, 10), glassMat.clone());
     lm.rotation.x = Math.PI / 2;
     lm.position.set(side * W * 0.32, hullY + H * 1.25, L * 0.48);
     hull.add(lm);
     lightMeshes.push(lm);
+    // фейк-конус — всегда (дешёвый волюметрик), реальный спот — только при withLights.
+    // У ботов спотов нет: ночью это минус ~24 источника света на сцену.
+    const cone = new THREE.Mesh(beamGeo, makeBeamMaterial());
+    cone.rotation.x = Math.PI / 2 + 0.055;
+    cone.position.set(side * W * 0.32, lm.position.y - 0.7, L * 0.48 + 14);
+    cone.visible = false;
+    cone.renderOrder = 5;
+    hull.add(cone);
+    headCones.push(cone);
     if (withLights) {
-      const sp = new THREE.SpotLight(0xffe9b0, 0, 70, 0.55, 0.5, 1.2);
+      const sp = new THREE.SpotLight(0xffe9b0, 0, 75, 0.55, 0.5, 1.2);
       sp.position.copy(lm.position);
       sp.target.position.set(side * W * 0.32, 0, L * 0.5 + 30);
       hull.add(sp);
@@ -148,17 +296,6 @@ export function buildTank(id: TankId, camo: CamoId, team: number, withLights = t
       headlights.push(sp);
     }
   }
-  // выхлоп
-  for (const side of [-1, 1]) {
-    const ex = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.9, 8), darkMat);
-    ex.rotation.x = Math.PI / 2;
-    ex.position.set(side * W * 0.25, hullY + H * 0.8, -L * 0.5);
-    hull.add(ex);
-  }
-  // ящики ЗИП
-  const box = new THREE.Mesh(new THREE.BoxGeometry(W * 0.3, 0.35, 0.9), darkMat);
-  box.position.set(-W * 0.3, hullY + H * 1.45, -L * 0.3);
-  hull.add(box);
 
   // ---- Башня ----
   const turret = new THREE.Group();
@@ -179,65 +316,94 @@ export function buildTank(id: TankId, camo: CamoId, team: number, withLights = t
   }
   turretMesh.castShadow = true;
   turret.add(turretMesh);
-  // маска орудия
-  const mantlet = new THREE.Mesh(new THREE.BoxGeometry(W * 0.32, TH * 0.7, 0.6), darkMat);
-  mantlet.position.set(0, TH * 0.5, W * 0.32);
-  turret.add(mantlet);
-  // люк
-  const hatch = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 0.12, 12), darkMat);
-  hatch.position.set(-W * 0.12, TH + 0.06, -L * 0.03);
-  turret.add(hatch);
+  // маска + люк + антенна — один тёмный меш (статичны относительно башни)
+  const tdParts: THREE.BufferGeometry[] = [];
+  const mantGeo = new THREE.BoxGeometry(W * 0.32, TH * 0.7, 0.6);
+  tdParts.push(txg(mantGeo, 0, TH * 0.5, W * 0.32));
+  mantGeo.dispose();
+  const hatchGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.12, 12);
+  tdParts.push(txg(hatchGeo, -W * 0.12, TH + 0.06, -L * 0.03));
+  hatchGeo.dispose();
+  const antGeo = new THREE.CylinderGeometry(0.02, 0.03, 2.6, 4);
+  tdParts.push(txg(antGeo, -W * 0.25, TH + 1.3, -L * 0.1));
+  antGeo.dispose();
+  const turretDark = tmerged(tdParts, darkMat, false);
+  if (turretDark) turret.add(turretDark);
   // командирская башенка со смотровыми приборами
   const cupola = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.55, 0.4, 10), bodyMat);
   cupola.position.set(W * 0.16, TH + 0.2, -L * 0.06);
   turret.add(cupola);
+  // 6 визиров — один меш (было 6 draw calls)
+  const visParts: THREE.BufferGeometry[] = [];
+  const visGeo = new THREE.BoxGeometry(0.18, 0.12, 0.06);
   for (let i = 0; i < 6; i++) {
     const a = (i / 6) * Math.PI * 2;
-    const vis = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.12, 0.06), glassMat);
-    vis.position.set(cupola.position.x + Math.cos(a) * 0.52, cupola.position.y + 0.08, cupola.position.z + Math.sin(a) * 0.52);
-    vis.rotation.y = -a + Math.PI / 2;
-    turret.add(vis);
+    visParts.push(txg(visGeo, cupola.position.x + Math.cos(a) * 0.52, cupola.position.y + 0.08, cupola.position.z + Math.sin(a) * 0.52, -a + Math.PI / 2));
   }
-  // антенна
-  const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.03, 2.6, 4), darkMat);
-  ant.position.set(-W * 0.25, TH + 1.3, -L * 0.1);
-  turret.add(ant);
+  visGeo.dispose();
+  const visors = tmerged(visParts, glassMat, false);
+  if (visors) turret.add(visors);
 
   // ---- Орудие ----
   const barrel = new THREE.Group();
   barrel.position.set(0, TH * 0.5, W * 0.25);
   turret.add(barrel);
   const br = id === 'e100' ? 0.26 : id === 't34' ? 0.17 : 0.14;
-  const gun = new THREE.Mesh(new THREE.CylinderGeometry(br, br * 1.15, BL, 12), darkMat);
-  gun.rotation.x = Math.PI / 2;
-  gun.position.z = BL / 2;
-  gun.castShadow = true;
-  barrel.add(gun);
-  const brake = new THREE.Mesh(new THREE.CylinderGeometry(br * 1.5, br * 1.5, br * 5, 12), darkMat);
-  brake.rotation.x = Math.PI / 2;
-  brake.position.z = BL - br * 2;
-  barrel.add(brake);
+  // ствол + дульный тормоз — один меш (статичны относительно люльки)
+  const gunParts: THREE.BufferGeometry[] = [];
+  const gunGeo = new THREE.CylinderGeometry(br, br * 1.15, BL, 12);
+  gunParts.push(txg(gunGeo, 0, 0, BL / 2, 0, 1, 1, 1, Math.PI / 2));
+  gunGeo.dispose();
+  const brakeGeo = new THREE.CylinderGeometry(br * 1.5, br * 1.5, br * 5, 12);
+  gunParts.push(txg(brakeGeo, 0, 0, BL - br * 2, 0, 1, 1, 1, Math.PI / 2));
+  brakeGeo.dispose();
+  const gunMerged = tmerged(gunParts, darkMat, false);
+  if (gunMerged) barrel.add(gunMerged);
   const muzzle = new THREE.Object3D();
   muzzle.position.z = BL + 0.2;
   barrel.add(muzzle);
 
-  return { group, hull, turret, barrel, muzzle, wheels, headlights, lightMeshes, bodyMats: [bodyMat, bodyMat2] };
+  return { group, hull, turret, barrel, muzzle, wheels, headlights, headCones, lightMeshes, bodyMats: [bodyMat, bodyMat2] };
 }
 
-// Превращает модель в остов (сгоревший)
+// Превращает модель в остов (сгоревший).
+// Старые материалы диспоузим сразу, иначе каждый kill в deathmatch
+// оставляет 6-8 висящих GPU-материалов (рост памяти за серию боёв).
 export function wreckify(model: TankModel) {
-  const burnt = new THREE.MeshStandardMaterial({ color: 0x1a1a18, roughness: 1, metalness: 0.2 });
+  const burnt = getBurntMat();
+  const doomed = new Set<THREE.Material>();
   model.group.traverse((o) => {
     if ((o as THREE.Mesh).isMesh && o.name !== 'hitbox') {
       const m = o as THREE.Mesh;
+      const mats = Array.isArray(m.material) ? m.material : [m.material];
+      for (const mat of mats) {
+        if (mat && mat !== burnt) doomed.add(mat as THREE.Material);
+      }
       if (m.material !== burnt) m.material = burnt;
     }
   });
+  for (const mat of doomed) {
+    try { mat.dispose(); } catch { /* */ }
+  }
+  // bodyMats больше не валидны (задиспоужены выше) — чистим, чтобы
+  // disposeTankModel не пытался их трогать повторно
+  model.bodyMats.length = 0;
   model.turret.rotation.z = 0.25;
   model.turret.rotation.x = -0.15;
   model.turret.position.y += 0.35;
   model.turret.position.x += 0.6;
   model.barrel.rotation.x = 0.35;
   model.hull.rotation.z = 0.06;
-  model.headlights.forEach((h) => (h.intensity = 0));
+  model.headlights.forEach((h) => {
+    h.intensity = 0;
+    h.visible = false;
+  });
+  model.headCones.forEach((c) => {
+    c.visible = false;
+    setBeamOpacity(c, 0);
+  });
+  model.lightMeshes.forEach((m) => {
+    const mat = m.material as THREE.MeshStandardMaterial;
+    if (mat && 'emissiveIntensity' in mat) mat.emissiveIntensity = 0.1;
+  });
 }

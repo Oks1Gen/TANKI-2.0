@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { memo, useEffect, useRef } from 'react';
 import { HudSnapshot } from '../game/engine';
 import { SHELLS, SHELL_ORDER, ShellType, BOOST_DAMAGE_MUL, BOOST_SPEED_MUL } from '../game/config';
 import { fmtTime } from './common';
@@ -9,35 +9,97 @@ interface Props {
 }
 
 const PICKUP_COLORS: Record<string, string> = { repair: '#62ff7a', speed: '#5ad8ff', damage: '#ff7a3c', ammo: '#ffd84a' };
+const MAP_SIZE = 200;
 
-export default function HUD({ s, staticMap }: Props) {
+export default memo(function HUD({ s, staticMap }: Props) {
   const mapRef = useRef<HTMLCanvasElement>(null);
+  const staticRef = useRef<HTMLCanvasElement | null>(null);
 
-  // ---- Миникарта ----
+  // ---- Статик миникарты: фон + сетка + препятствия — только при смене карты ----
   useEffect(() => {
-    const c = mapRef.current;
-    if (!c || !staticMap) return;
-    const ctx = c.getContext('2d')!;
-    const W = c.width;
+    if (!staticMap) return;
+    let off = staticRef.current;
+    if (!off) {
+      off = document.createElement('canvas');
+      off.width = MAP_SIZE;
+      off.height = MAP_SIZE;
+      staticRef.current = off;
+    }
+    const ctx = off.getContext('2d')!;
+    const W = MAP_SIZE;
     const half = staticMap.half;
-    const sx = (x: number) => ((x / half + 1) / 2) * W;
-    const sy = (z: number) => (1 - (z / half + 1) / 2) * W;
     ctx.clearRect(0, 0, W, W);
     ctx.fillStyle = 'rgba(8,11,8,0.82)';
     ctx.fillRect(0, 0, W, W);
-    // сетка
     ctx.strokeStyle = 'rgba(185,255,61,0.08)';
     ctx.lineWidth = 1;
     for (let i = 1; i < 4; i++) {
       ctx.beginPath(); ctx.moveTo((W / 4) * i, 0); ctx.lineTo((W / 4) * i, W); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(0, (W / 4) * i); ctx.lineTo(W, (W / 4) * i); ctx.stroke();
     }
-    // препятствия
+    const sx = (x: number) => ((x / half + 1) / 2) * W;
+    const sy = (z: number) => (1 - (z / half + 1) / 2) * W;
     for (const o of staticMap.obstacles) {
       ctx.fillStyle = o.kind === 'building' || o.kind === 'hangar' ? 'rgba(142,160,140,0.55)' : o.kind === 'bunker' || o.kind === 'concrete' ? 'rgba(150,150,145,0.65)' : o.kind === 'rock' || o.kind === 'hill' ? 'rgba(110,110,100,0.5)' : o.kind === 'tree' ? 'rgba(60,110,60,0.5)' : 'rgba(120,120,110,0.4)';
       const w = Math.max(2, (o.w / (half * 2)) * W);
       const d = Math.max(2, (o.d / (half * 2)) * W);
       ctx.fillRect(sx(o.x) - w / 2, sy(o.z) - d / 2, w, d);
+    }
+  }, [staticMap]);
+
+  // ---- DPR-шарпнесс миникарты (один раз) ----
+  useEffect(() => {
+    const c = mapRef.current;
+    if (!c) return;
+    try {
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      if (dpr > 1 && c.width === MAP_SIZE) {
+        c.width = MAP_SIZE * dpr;
+        c.height = MAP_SIZE * dpr;
+        c.style.width = `${MAP_SIZE}px`;
+        c.style.height = `${MAP_SIZE}px`;
+      }
+    } catch {
+      /* */
+    }
+  }, []);
+
+  // ---- Миникарта: динамика каждый тик поверх статики ----
+  useEffect(() => {
+    const c = mapRef.current;
+    if (!c || !staticMap) return;
+    const ctx = c.getContext('2d')!;
+    const dpr = c.width > MAP_SIZE ? c.width / MAP_SIZE : 1;
+    const W = MAP_SIZE;
+    const half = staticMap.half;
+    const sx = (x: number) => ((x / half + 1) / 2) * W;
+    const sy = (z: number) => (1 - (z / half + 1) / 2) * W;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, W);
+    if (staticRef.current) ctx.drawImage(staticRef.current, 0, 0, W, W);
+    else {
+      ctx.fillStyle = 'rgba(8,11,8,0.82)';
+      ctx.fillRect(0, 0, W, W);
+    }
+    // разрушенные здания — тёмным поверх статики (статика рисуется 1 раз и не знает о разрушениях)
+    const destroyed = s.minimap.destroyed ?? [];
+    if (destroyed.length) {
+      for (const o of destroyed) {
+        const w = Math.max(2, (o.w / (half * 2)) * W);
+        const d = Math.max(2, (o.d / (half * 2)) * W);
+        const cx = sx(o.x) - w / 2;
+        const cy = sy(o.z) - d / 2;
+        ctx.fillStyle = 'rgba(8,8,8,0.85)';
+        ctx.fillRect(cx, cy, w, d);
+        ctx.strokeStyle = 'rgba(255,80,60,0.5)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + w, cy + d);
+        ctx.moveTo(cx + w, cy);
+        ctx.lineTo(cx, cy + d);
+        ctx.stroke();
+      }
     }
     // точки
     for (const p of s.points) {
@@ -304,9 +366,9 @@ export default function HUD({ s, staticMap }: Props) {
       )}
     </div>
   );
-}
+});
 
-function Module({ label, icon, v, broken }: { label: string; icon: string; v: number; broken: boolean }) {
+const Module = memo(function Module({ label, icon, v, broken }: { label: string; icon: string; v: number; broken: boolean }) {
   const col = broken ? '#ff4d4d' : v < 0.5 ? '#ffb424' : '#b9ff3d';
   return (
     <div className={`border px-1.5 py-1 mono text-center ${broken ? 'pulse' : ''}`} style={{ borderColor: col + '80' }}>
@@ -316,4 +378,4 @@ function Module({ label, icon, v, broken }: { label: string; icon: string; v: nu
       <div className="text-[8px] mt-0.5" style={{ color: col }}>{broken ? 'РЕМОНТ' : v < 0.5 ? 'ПОВРЕЖД.' : 'НОРМА'}</div>
     </div>
   );
-}
+});

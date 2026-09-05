@@ -1,7 +1,46 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { ARENA_SIZE, BattleConfig, Biome, TimeOfDay, Weather } from './config';
 
-export type ObstacleKind = 'building' | 'hangar' | 'bunker' | 'concrete' | 'barrier' | 'crate' | 'rock' | 'tree' | 'hill' | 'wall';
+// Заморозка статики: three.js иначе каждый кадр пересчитывает матрицы ВСЕХ объектов
+// (~700 штук здесь) из position/quaternion/scale. Для неподвижного вызываем один раз.
+export function freezeStatic(root: THREE.Object3D) {
+  root.traverse((o) => {
+    o.updateMatrix();
+    o.matrixAutoUpdate = false;
+  });
+  root.updateMatrixWorld(true);
+}
+
+// Клон геометрии с трансформацией — для merge мелких деталей в 1 меш (меньше draw calls)
+const _xe = new THREE.Euler();
+const _xq = new THREE.Quaternion();
+const _xp = new THREE.Vector3();
+const _xs = new THREE.Vector3();
+const _xm = new THREE.Matrix4();
+function xg(geo: THREE.BufferGeometry, x: number, y: number, z: number, ry = 0, sx = 1, sy = 1, sz = 1, rx = 0, rz = 0): THREE.BufferGeometry {
+  const g = geo.clone();
+  _xe.set(rx, ry, rz);
+  _xq.setFromEuler(_xe);
+  _xp.set(x, y, z);
+  _xs.set(sx, sy, sz);
+  _xm.compose(_xp, _xq, _xs);
+  g.applyMatrix4(_xm);
+  return g;
+}
+
+function mergedMesh(parts: THREE.BufferGeometry[], mat: THREE.Material, disposables: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[], shadows: { cast?: boolean; receive?: boolean } = {}): THREE.Mesh | null {
+  if (!parts.length) return null;
+  const geo = mergeGeometries(parts, false)!;
+  for (const p of parts) p.dispose();
+  disposables.push(geo);
+  const m = new THREE.Mesh(geo, mat);
+  m.castShadow = shadows.cast ?? false;
+  m.receiveShadow = shadows.receive ?? false;
+  return m;
+}
+
+export type ObstacleKind = 'building' | 'hangar' | 'bunker' | 'concrete' | 'barrier' | 'crate' | 'rock' | 'tree' | 'hill' | 'wall' | 'lamp';
 
 export interface Obstacle {
   id: number;
@@ -19,6 +58,8 @@ export interface Obstacle {
   alive: boolean;
   mesh: THREE.Object3D;
   blocksShots: boolean;
+  /** крупные руины (дом/ангар) продолжают блокировать движение уменьшенным футпринтом */
+  rubble?: boolean;
 }
 
 export interface PickupType {
@@ -68,15 +109,28 @@ export interface Environment {
   ambient: THREE.AmbientLight;
   fogColor: THREE.Color;
   isNight: boolean;
+  darkFactor: number; // 0 = день, 1 = глубокая ночь (время + погода)
   visibility: number;
   skyColor: THREE.Color;
   sunDir: THREE.Vector3;
+}
+
+export interface Lamp {
+  x: number;
+  z: number;
+  light: THREE.PointLight;
+  headMat: THREE.MeshStandardMaterial;
+  glow: THREE.Sprite;
+  ground: THREE.Mesh;
+  baseIntensity: number;
+  phase: number;
 }
 
 export interface World {
   obstacles: Obstacle[];
   pickups: Pickup[];
   capPoints: CapPoint[];
+  lamps: Lamp[];
   env: Environment;
   groundColor: THREE.Color;
   half: number;
@@ -145,9 +199,30 @@ const TIME_PRESETS: Record<TimeOfDay, TimePreset> = {
   dusk: { sky: 0x2c2e50, fog: 0x3a3a58, sun: 0x9a80c0, sunI: 0.5, elev: 0.08, azim: -2.0, hemiSky: 0x3c3e66, hemiGround: 0x1a1a20, hemiI: 0.4, amb: 0x1c1c30, night: true },
 };
 
+// 0 = день, 1 = глубокая ночь. Учитывает время суток + погоду (туман/гроза тоже затемняют).
+export function getDarkFactor(time: TimeOfDay, weather: Weather): number {
+  const base: Record<TimeOfDay, number> = {
+    night: 1.0,
+    dusk: 0.85,
+    sunset: 0.65,
+    evening: 0.45,
+    dawn: 0.32,
+    morning: 0.05,
+    day: 0,
+    noon: 0,
+  };
+  let d = base[time] ?? 0;
+  if (weather === 'fog') d += 0.25;
+  else if (weather === 'storm') d += 0.35;
+  else if (weather === 'rain') d += 0.15;
+  else if (weather === 'snow') d += 0.05;
+  return Math.max(0, Math.min(1, d));
+}
+
 export function setupEnvironment(scene: THREE.Scene, cfg: BattleConfig): Environment {
   const tp = TIME_PRESETS[cfg.time];
   const w: Weather = cfg.weather;
+  const darkFactor = getDarkFactor(cfg.time, cfg.weather);
   const sky = new THREE.Color(tp.sky);
   const fog = new THREE.Color(tp.fog);
   let sunI = tp.sunI;
@@ -177,17 +252,19 @@ export function setupEnvironment(scene: THREE.Scene, cfg: BattleConfig): Environ
   if (cfg.biome === 'desert' && !tp.night) fog.lerp(new THREE.Color(0xf0d9a8), 0.35);
 
   scene.background = sky;
-  const density = (0.0035 + (1 - visibility) * 0.02) * (tp.night ? 1.25 : 1);
+  const density = (0.0035 + (1 - visibility) * 0.02) * (1 + darkFactor * 0.25);
   scene.fog = new THREE.FogExp2(fog.getHex(), density);
 
   const sun = new THREE.DirectionalLight(tp.sun, sunI);
   const dist = 140;
   sun.position.set(Math.cos(tp.azim) * Math.cos(tp.elev) * dist, Math.sin(tp.elev) * dist + 10, Math.sin(tp.azim) * Math.cos(tp.elev) * dist);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
+  // 1024 вместо 2048: shadow-pass в 4 раза дешевле, на такой камере разницы почти не видно.
+  // Камера теней ужата до 95м — солнце следует за игроком (см. engine), большую карту крыть не нужно.
+  sun.shadow.mapSize.set(1024, 1024);
   sun.shadow.camera.near = 10;
   sun.shadow.camera.far = 460;
-  const sh = ARENA_SIZE / 2 + 30;
+  const sh = 95;
   sun.shadow.camera.left = -sh;
   sun.shadow.camera.right = sh;
   sun.shadow.camera.top = sh;
@@ -202,7 +279,8 @@ export function setupEnvironment(scene: THREE.Scene, cfg: BattleConfig): Environ
   const ambient = new THREE.AmbientLight(tp.amb, 1.0);
   scene.add(ambient);
 
-  return { sun, hemi, ambient, fogColor: fog, isNight: tp.night, visibility, skyColor: sky, sunDir: sun.position.clone().normalize() };
+  const isNight = tp.night || darkFactor > 0.35;
+  return { sun, hemi, ambient, fogColor: fog, isNight, darkFactor, visibility, skyColor: sky, sunDir: sun.position.clone().normalize() };
 }
 
 // ---------- Текстура земли ----------
@@ -236,7 +314,7 @@ function groundTexture(biome: Biome, rnd: () => number): THREE.Texture {
   return t;
 }
 
-function letterSprite(letter: string): THREE.Sprite {
+function letterSprite(letter: string, disposables?: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[]): THREE.Sprite {
   const c = document.createElement('canvas');
   c.width = 128;
   c.height = 128;
@@ -249,7 +327,9 @@ function letterSprite(letter: string): THREE.Sprite {
   ctx.shadowBlur = 12;
   ctx.fillText(letter, 64, 68);
   const tex = new THREE.CanvasTexture(c);
-  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+  if (disposables) disposables.push(tex, mat);
+  const s = new THREE.Sprite(mat);
   s.scale.set(5, 5, 1);
   return s;
 }
@@ -270,6 +350,7 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
   const ground = new THREE.Mesh(groundGeo, groundMat);
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
+  freezeStatic(ground);
   scene.add(ground);
   disposables.push(groundGeo, groundMat);
 
@@ -294,12 +375,14 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
 
   const addBox = (kind: ObstacleKind, x: number, z: number, w: number, d: number, h: number, mesh: THREE.Object3D, hp: number, destructible: boolean, blocksShots = true) => {
     mesh.position.set(x, 0, z);
+    freezeStatic(mesh);
     scene.add(mesh);
     obstacles.push({ id: oid++, kind, shape: 'box', x, z, hw: w / 2, hd: d / 2, r: Math.hypot(w, d) / 2, h, hp, maxHp: hp, destructible, alive: true, mesh, blocksShots });
     minimapObstacles.push({ x, z, w, d, kind });
   };
   const addCircle = (kind: ObstacleKind, x: number, z: number, r: number, h: number, mesh: THREE.Object3D, blocksShots = true) => {
     mesh.position.set(x, 0, z);
+    freezeStatic(mesh);
     scene.add(mesh);
     obstacles.push({ id: oid++, kind, shape: 'circle', x, z, hw: r, hd: r, r, h, hp: 1e9, maxHp: 1e9, destructible: false, alive: true, mesh, blocksShots });
     minimapObstacles.push({ x, z, w: r * 2, d: r * 2, kind });
@@ -338,8 +421,20 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
   };
 
   // ---- Периметр ----
+  // ОПТИМИЗАЦИЯ: переиспользуем ~6 общих геометрий вместо 88 уникальных (меньше памяти и аплоадов)
   const isMount = cfg.biome === 'mountains';
   const segs = 22;
+  const perimGeoCache = new Map<string, THREE.ConeGeometry>();
+  const getPerimGeo = (h: number, r: number, seg: number) => {
+    const key = `${Math.round(h)}_${Math.round(r * 2)}_${seg}`;
+    let g = perimGeoCache.get(key);
+    if (!g) {
+      g = new THREE.ConeGeometry(r, h, seg);
+      perimGeoCache.set(key, g);
+      disposables.push(g);
+    }
+    return g;
+  };
   for (let i = 0; i < segs; i++) {
     const t = (i + 0.5) / segs;
     const coords: [number, number][] = [
@@ -351,13 +446,15 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
     for (const [x, z] of coords) {
       const h = (isMount ? 22 : 9) + rnd() * (isMount ? 18 : 6);
       const r = ARENA_SIZE / segs * 0.75 + rnd() * 3;
-      const geo = new THREE.ConeGeometry(r, h, 6 + Math.floor(rnd() * 3));
-      disposables.push(geo);
+      const segN = 6 + Math.floor(rnd() * 3);
+      const geo = getPerimGeo(h, r, segN);
       const m = new THREE.Mesh(geo, isMount ? rockMat : hillMat);
       m.position.set(x + (rnd() - 0.5) * 4, h / 2 - 1, z + (rnd() - 0.5) * 4);
       m.rotation.y = rnd() * Math.PI;
-      m.castShadow = true;
-      m.receiveShadow = true;
+      // периметр за краем арены: тени выключены — они всё равно вне shadow-камеры и только грузят pass
+      m.castShadow = false;
+      m.receiveShadow = false;
+      freezeStatic(m);
       scene.add(m);
     }
   }
@@ -390,11 +487,12 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
     m.rotation.x = -Math.PI / 2;
     m.position.set(vertical ? off : 0, 0.03, vertical ? 0 : off);
     m.receiveShadow = true;
+    freezeStatic(m);
     scene.add(m);
   }
 
   // ---- Кварталы укрытий: дома, ангары, доты, бетон ----
-  const winMatShared = new THREE.MeshStandardMaterial({ color: 0x0d1418, emissive: env.isNight ? 0xffc870 : 0x000000, emissiveIntensity: env.isNight ? 1.2 : 0, roughness: 0.3 });
+  const winMatShared = new THREE.MeshStandardMaterial({ color: 0x0d1418, emissive: env.darkFactor > 0.05 ? 0xffc870 : 0x000000, emissiveIntensity: env.darkFactor * 1.4, roughness: 0.3 });
   disposables.push(winMatShared);
   const concreteMat = new THREE.MeshStandardMaterial({ color: 0x9a9a94, roughness: 0.95 });
   disposables.push(concreteMat);
@@ -415,17 +513,18 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
     roof.position.y = h + 0.25;
     roof.castShadow = true;
     g.add(roof);
+    // окна — было до ~24 мешей (draw calls) на дом, мержим в один
     const rows = Math.max(1, Math.floor(h / 2.6));
     const cols = Math.max(1, Math.floor(w / 3));
+    const winParts: THREE.BufferGeometry[] = [];
     for (let r = 0; r < rows; r++)
       for (let c = 0; c < cols; c++) {
         for (const side of [-1, 1]) {
-          const win = new THREE.Mesh(boxGeo, winMatShared);
-          win.scale.set(1.2, 1.4, 0.2);
-          win.position.set(-w / 2 + (c + 0.5) * (w / cols), 1.6 + r * 2.6, side * (d / 2 + 0.05));
-          g.add(win);
+          winParts.push(xg(boxGeo, -w / 2 + (c + 0.5) * (w / cols), 1.6 + r * 2.6, side * (d / 2 + 0.05), 0, 1.2, 1.4, 0.2));
         }
       }
+    const wins = mergedMesh(winParts, winMatShared, disposables);
+    if (wins) g.add(wins);
     return g;
   };
   const makeHangar = (w: number, d: number, h: number) => {
@@ -471,15 +570,13 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
   const makeConcrete = (s: number) => {
     const g = new THREE.Group();
     const n = 1 + Math.floor(rnd() * 2);
+    // мелкий бетон: тени не видно, в shadow-pass не участвуем
+    const parts: THREE.BufferGeometry[] = [];
     for (let k = 0; k < n; k++) {
-      const m = new THREE.Mesh(boxGeo, concreteMat);
-      m.scale.set(s, s * 0.7, s);
-      m.position.set((rnd() - 0.5) * s, s * 0.35 + (k > 0 ? s * 0.7 : 0), (rnd() - 0.5) * s);
-      m.rotation.y = (rnd() - 0.5) * 0.4;
-      m.castShadow = true;
-      m.receiveShadow = true;
-      g.add(m);
+      parts.push(xg(boxGeo, (rnd() - 0.5) * s, s * 0.35 + (k > 0 ? s * 0.7 : 0), (rnd() - 0.5) * s, (rnd() - 0.5) * 0.4, s, s * 0.7, s));
     }
+    const m = mergedMesh(parts, concreteMat, disposables, { receive: true });
+    if (m) g.add(m);
     return g;
   };
 
@@ -559,7 +656,7 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
     const m = new THREE.Mesh(boxGeo, barrierMat);
     m.scale.set(w, 2.2, d);
     m.position.y = 1.1;
-    m.castShadow = true;
+    m.castShadow = false; // низкий барьер: тени почти не видно, экономим shadow-pass
     m.receiveShadow = true;
     g.add(m);
     addBox('barrier', pos.x, pos.z, w, d, 2.2, g, 320, true);
@@ -572,29 +669,42 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
     if (!pos) continue;
     const g = new THREE.Group();
     const n = 1 + Math.floor(rnd() * 3);
+    const crateParts: THREE.BufferGeometry[] = [];
     for (let k = 0; k < n; k++) {
-      const m = new THREE.Mesh(boxGeo, crateMat);
-      m.scale.set(s, s * 0.8, s);
-      m.position.set((rnd() - 0.5) * s * 0.4, s * 0.4 + k * s * 0.8, (rnd() - 0.5) * s * 0.4);
-      m.rotation.y = rnd() * 0.5;
-      m.castShadow = true;
-      g.add(m);
+      crateParts.push(xg(boxGeo, (rnd() - 0.5) * s * 0.4, s * 0.4 + k * s * 0.8, (rnd() - 0.5) * s * 0.4, rnd() * 0.5, s, s * 0.8, s));
+    }
+    const cm = mergedMesh(crateParts, crateMat, disposables);
+    if (cm) {
+      cm.receiveShadow = true;
+      g.add(cm);
     }
     addBox('crate', pos.x, pos.z, s * 1.2, s * 1.2, s, g, 120, true);
   }
 
   // ---- Скалы (масштабировано под 210) ----
+  // Геометрии квантуем по 0.5м и переиспользуем — было по уникальной на каждую скалу
+  const rockGeoCache = new Map<number, THREE.DodecahedronGeometry>();
+  const getRockGeo = (r: number) => {
+    const key = Math.round(r * 2) / 2;
+    let geo = rockGeoCache.get(key);
+    if (!geo) {
+      geo = new THREE.DodecahedronGeometry(key, 0);
+      rockGeoCache.set(key, geo);
+      disposables.push(geo);
+    }
+    return { geo, key };
+  };
   const rockCount = cfg.biome === 'mountains' ? 28 : cfg.biome === 'desert' ? 18 : 12;
   for (let i = 0; i < rockCount; i++) {
     const r = 2.5 + rnd() * 4;
     const pos = place(r, 10);
     if (!pos) continue;
-    const geo = new THREE.DodecahedronGeometry(r, 0);
-    disposables.push(geo);
+    const { geo, key } = getRockGeo(r);
     const m = new THREE.Mesh(geo, rockMat);
+    // компенсируем квантование масштабом
+    m.scale.set(r / key, (r / key) * (0.7 + rnd() * 0.5), r / key);
     m.position.y = r * 0.45;
     m.rotation.set(rnd() * 3, rnd() * 3, rnd() * 3);
-    m.scale.y = 0.7 + rnd() * 0.5;
     m.castShadow = true;
     m.receiveShadow = true;
     const g = new THREE.Group();
@@ -631,7 +741,7 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
     const g = new THREE.Group();
     const trunk = new THREE.Mesh(trunkGeo, trunkMat);
     trunk.position.y = 1.5;
-    trunk.castShadow = true;
+    trunk.castShadow = false; // тонкий ствол тени почти не даёт, а draw в shadow-pass стоит
     g.add(trunk);
     const s = 0.8 + rnd() * 0.6;
     const crown = new THREE.Mesh(treeGeo, treeMat);
@@ -640,6 +750,109 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
     crown.castShadow = true;
     g.add(crown);
     addCircle('tree', pos.x, pos.z, 0.7, 7, g, false);
+  }
+
+  // ---- Фонари (уличное освещение для тёмного времени) ----
+  const lamps: Lamp[] = [];
+  {
+    const poleMat = new THREE.MeshStandardMaterial({ color: 0x2c2f33, roughness: 0.8, metalness: 0.4 });
+    const poleGeo = new THREE.CylinderGeometry(0.16, 0.24, 6.5, 8);
+    const armGeo = new THREE.BoxGeometry(1.6, 0.15, 0.15);
+    const headGeo = new THREE.SphereGeometry(0.35, 10, 8);
+    const groundGeo = new THREE.CircleGeometry(9, 20);
+    disposables.push(poleMat, poleGeo, armGeo, headGeo, groundGeo);
+    // радиальная текстура свечения (спрайт) — дешёвый bloom без света
+    const glowCanvas = document.createElement('canvas');
+    glowCanvas.width = 128;
+    glowCanvas.height = 128;
+    const gctx = glowCanvas.getContext('2d')!;
+    const grad = gctx.createRadialGradient(64, 64, 4, 64, 64, 64);
+    grad.addColorStop(0, 'rgba(255,220,150,1)');
+    grad.addColorStop(0.35, 'rgba(255,190,110,0.55)');
+    grad.addColorStop(1, 'rgba(255,180,100,0)');
+    gctx.fillStyle = grad;
+    gctx.fillRect(0, 0, 128, 128);
+    const glowTex = new THREE.CanvasTexture(glowCanvas);
+    disposables.push(glowTex);
+    // ОПТИМИЗАЦИЯ: общие материалы на все фонари (было 3 материала на фонарь).
+    // Яркость одинакова для всех — нет смысла дублировать.
+    const lampHeadMat = new THREE.MeshStandardMaterial({
+      color: 0x443a28,
+      emissive: 0xffc37a,
+      emissiveIntensity: 0.15 + env.darkFactor * 2.6,
+      roughness: 0.4,
+    });
+    const lampGlowMat = new THREE.SpriteMaterial({
+      map: glowTex,
+      transparent: true,
+      opacity: env.darkFactor * 0.9,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const lampGroundMat = new THREE.MeshBasicMaterial({
+      color: 0xffbe78,
+      transparent: true,
+      opacity: env.darkFactor * 0.16,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    disposables.push(lampHeadMat, lampGlowMat, lampGroundMat);
+
+    const addLamp = (x: number, z: number) => {
+      const g = new THREE.Group();
+      const pole = new THREE.Mesh(poleGeo, poleMat);
+      pole.position.y = 3.25;
+      pole.castShadow = false; // ОПТИМИЗАЦИЯ: тонкий столб не даёт видимой тени ночью
+      g.add(pole);
+      const arm = new THREE.Mesh(armGeo, poleMat);
+      arm.position.set(0.6, 6.4, 0);
+      arm.castShadow = false;
+      g.add(arm);
+      const head = new THREE.Mesh(headGeo, lampHeadMat);
+      head.position.set(1.3, 6.25, 0);
+      g.add(head);
+      // спрайт-гало вокруг лампы
+      const glow = new THREE.Sprite(lampGlowMat);
+      glow.scale.set(7, 7, 1);
+      glow.position.set(1.3, 6.2, 0);
+      glow.visible = env.darkFactor > 0.05;
+      g.add(glow);
+      // пятно света на земле (фейк, без стоимости света)
+      const groundDisc = new THREE.Mesh(groundGeo, lampGroundMat);
+      groundDisc.rotation.x = -Math.PI / 2;
+      groundDisc.position.set(1.3, 0.05, 0);
+      g.add(groundDisc);
+      // настоящий свет — только при темноте, без теней, с ограниченной дальностью
+      const light = new THREE.PointLight(0xffc37a, env.darkFactor * 60, 32, 1.8);
+      light.position.set(1.3, 6.0, 0);
+      light.visible = env.darkFactor > 0.35;
+      g.add(light);
+      // h=1.5: тонкий столб не должен считаться укрытием для ИИ (findCover требует h>=2.5)
+      addCircle('lamp', x, z, 0.6, 1.5, g, false);
+      minimapObstacles.pop(); // фонари не засоряют миникарту
+      lamps.push({ x, z, light, headMat: lampHeadMat, glow, ground: groundDisc, baseIntensity: 60, phase: rnd() * Math.PI * 2 });
+    };
+
+    // 1) по одному фонарю у каждой точки захвата (сбоку, чтобы не мешал)
+    for (const c of capSpots) {
+      const cand = [
+        { x: c.x + 13.5, z: c.z + 4 },
+        { x: c.x - 13.5, z: c.z - 4 },
+      ];
+      for (const pt of cand) {
+        if (Math.abs(pt.x) < half - 6 && Math.abs(pt.z) < half - 6 && isFree(pt.x, pt.z, 1.2)) {
+          addLamp(pt.x, pt.z);
+          break;
+        }
+      }
+    }
+    // 2) остальные — случайно по карте (вдоль дорог и кварталов)
+    const lampTarget = 10;
+    for (let i = lamps.length; i < lampTarget; i++) {
+      const pos = place(1.5, 10, 50);
+      if (!pos) continue;
+      addLamp(pos.x, pos.z);
+    }
   }
 
   // ---- Декоративные воронки ----
@@ -651,6 +864,7 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
     const s = 2 + rnd() * 3;
     m.scale.set(s, s * (0.7 + rnd() * 0.5), 1);
     m.position.set((rnd() * 2 - 1) * (half - 8), 0.02, (rnd() * 2 - 1) * (half - 8));
+    freezeStatic(m);
     scene.add(m);
   }
 
@@ -674,10 +888,15 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
     fill.position.set(c.x, 0.05, c.z);
     const beacon = new THREE.Mesh(beaconGeo, beaconMat);
     beacon.position.set(c.x, 30, c.z);
-    const light = new THREE.PointLight(0xffffff, env.isNight ? 40 : 10, 40, 1.6);
+    const light = new THREE.PointLight(0xffffff, 10 + env.darkFactor * 35, 40, 1.6);
     light.position.set(c.x, 6, c.z);
-    const label = letterSprite(c.letter);
+    const label = letterSprite(c.letter, disposables);
     label.position.set(c.x, 12, c.z);
+    // трансформы точек статичны (пульсация — только материалами), замораживаем
+    for (const o of [ring, fill, beacon, light, label]) {
+      o.updateMatrix();
+      o.matrixAutoUpdate = false;
+    }
     scene.add(ring, fill, beacon, light, label);
     capPoints.push({ id: i, letter: c.letter, x: c.x, z: c.z, radius, owner: -1, progress: 0, capturing: -1, contested: false, ring, beacon, fill, light, label, blockedTimer: 0 });
   });
@@ -719,8 +938,9 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
     }
     disposables.push(geo);
     const baseGeo = new THREE.CylinderGeometry(2.6, 2.6, 0.15, 20);
-    disposables.push(baseGeo);
-    const base = new THREE.Mesh(baseGeo, new THREE.MeshBasicMaterial({ color: type.color, transparent: true, opacity: 0.5 }));
+    const baseMat = new THREE.MeshBasicMaterial({ color: type.color, transparent: true, opacity: 0.5 });
+    disposables.push(baseGeo, baseMat);
+    const base = new THREE.Mesh(baseGeo, baseMat);
     base.position.y = -1.1;
     g.add(base);
     // световой столб — видно издалека на большой карте и за укрытиями
@@ -733,6 +953,9 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
     g.add(beam);
     g.scale.setScalar(1.4);
     g.position.set(pos.x, 1.6, pos.z);
+    // группа пикапа анимируется (вращение/парение) — динамическая,
+    // а дети относительно неё статичны — замораживаем их
+    for (const ch of g.children) freezeStatic(ch);
     scene.add(g);
     pickups.push({ id: i, type, x: pos.x, z: pos.z, active: true, respawnIn: 0, mesh: g });
   });
@@ -741,5 +964,5 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
     disposables.forEach((d) => d.dispose());
   };
 
-  return { obstacles, pickups, capPoints, env, groundColor: new THREE.Color(p.ground), half, minimapObstacles, dispose };
+  return { obstacles, pickups, capPoints, lamps, env, groundColor: new THREE.Color(p.ground), half, minimapObstacles, dispose };
 }

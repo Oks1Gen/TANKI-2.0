@@ -1,12 +1,15 @@
 {
-  "name": "react-vite-tailwind",
+  "name": "steel-assault-tanki-2",
   "private": true,
-  "version": "0.0.0",
+  "version": "2.0.0",
+  "description": "СТАЛЬНОЙ ШТУРМ — 3D танковые бои (React + Vite + three.js)",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node test/smoke.mjs",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@types/three": "^0.185.4",
@@ -22,6 +25,7 @@
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.1.1",
+    "esbuild": "0.24.2",
     "tailwindcss": "4.1.17",
     "typescript": "5.9.3",
     "vite": "7.3.2",

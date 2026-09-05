@@ -1,10 +1,16 @@
 // ===== Программный синтез звука (Web Audio API) =====
+import { loadSettings } from './settings';
+
+const MUTE_KEY = 'steel-assault-muted-v1';
 
 class AudioEngine {
   ctx: AudioContext | null = null;
   master!: GainNode;
   sfx!: GainNode;
   amb!: GainNode;
+  private muted = false;
+  private pausedDuck = false;
+  private volume = 0.7;
   private noiseBuf: AudioBuffer | null = null;
   private engineOsc: OscillatorNode | null = null;
   private engineOsc2: OscillatorNode | null = null;
@@ -15,8 +21,53 @@ class AudioEngine {
   private rainSrc: AudioBufferSourceNode | null = null;
   private rainGain: GainNode | null = null;
   private lastUi = 0;
+  private battleGen = 0;
+  private stopTimer: ReturnType<typeof setTimeout> | null = null;
+
+  isMuted(): boolean {
+    if (this.muted) return true;
+    try {
+      return localStorage.getItem(MUTE_KEY) === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  setMuted(m: boolean) {
+    this.muted = m;
+    try {
+      localStorage.setItem(MUTE_KEY, m ? '1' : '0');
+    } catch { /* ignore */ }
+    if (this.ctx) {
+      const base = this.pausedDuck ? this.volume * 0.21 : this.volume;
+      try {
+        this.master.gain.setTargetAtTime(m ? 0 : base, this.ctx.currentTime, 0.05);
+      } catch { /* */ }
+    }
+  }
+
+  getVolume(): number {
+    return this.volume;
+  }
+
+  setVolume(v: number) {
+    this.volume = Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0.7));
+    if (this.ctx) {
+      const base = this.pausedDuck ? this.volume * 0.21 : this.volume;
+      try {
+        this.master.gain.setTargetAtTime(this.muted ? 0 : base, this.ctx.currentTime, 0.05);
+      } catch { /* */ }
+    }
+  }
 
   init() {
+    // подхватываем сохранённый мьют и громкость даже до создания контекста
+    try {
+      this.muted = localStorage.getItem(MUTE_KEY) === '1';
+    } catch { /* */ }
+    try {
+      this.volume = loadSettings().volume;
+    } catch { /* */ }
     if (this.ctx) {
       if (this.ctx.state === 'suspended') this.ctx.resume();
       return;
@@ -25,7 +76,7 @@ class AudioEngine {
     if (!AC) return;
     this.ctx = new AC();
     this.master = this.ctx.createGain();
-    this.master.gain.value = 0.7;
+    this.master.gain.value = this.muted ? 0 : this.volume;
     this.master.connect(this.ctx.destination);
     this.sfx = this.ctx.createGain();
     this.sfx.connect(this.master);
@@ -194,8 +245,24 @@ class AudioEngine {
 
   // ---- Двигатель ----
   startEngine() {
-    if (!this.ctx || this.engineOsc) return;
+    if (!this.ctx) return;
+    // отменяем отложенную остановку предыдущего боя — новый бой переиспользует/пересоздаёт узлы
+    this.battleGen++;
+    if (this.stopTimer) {
+      clearTimeout(this.stopTimer);
+      this.stopTimer = null;
+    }
+    if (this.engineOsc) return;
     const ctx = this.ctx;
+    // отключаем осиротевшие фильтр/гейн от прошлого боя, если они остались
+    try {
+      this.engineFilter?.disconnect();
+      this.engineGain?.disconnect();
+    } catch {
+      /* */
+    }
+    this.engineFilter = null;
+    this.engineGain = null;
     this.engineOsc = ctx.createOscillator();
     this.engineOsc.type = 'sawtooth';
     this.engineOsc.frequency.value = 40;
@@ -265,25 +332,50 @@ class AudioEngine {
 
   stopBattleAudio() {
     if (!this.ctx) return;
+    const myGen = ++this.battleGen;
+    if (this.stopTimer) {
+      clearTimeout(this.stopTimer);
+      this.stopTimer = null;
+    }
     const t = this.ctx.currentTime;
     this.engineGain?.gain.setTargetAtTime(0, t, 0.2);
     this.windGain?.gain.setTargetAtTime(0, t, 0.5);
     this.rainGain?.gain.setTargetAtTime(0, t, 0.5);
-    setTimeout(() => {
+    // возвращаем громкость мастера — выход из паузы в ангар иначе оставляет всё тихим
+    try {
+      this.master.gain.setTargetAtTime(this.muted ? 0 : this.volume, t, 0.1);
+    } catch {
+      /* */
+    }
+    this.stopTimer = setTimeout(() => {
+      this.stopTimer = null;
+      // если за это время начался новый бой — чужие осцилляторы не трогаем
+      if (myGen !== this.battleGen) return;
       try {
         this.engineOsc?.stop();
         this.engineOsc2?.stop();
       } catch {
         /* */
       }
+      try {
+        this.engineOsc?.disconnect();
+        this.engineOsc2?.disconnect();
+        this.engineFilter?.disconnect();
+        this.engineGain?.disconnect();
+      } catch {
+        /* */
+      }
       this.engineOsc = null;
       this.engineOsc2 = null;
+      this.engineFilter = null;
+      this.engineGain = null;
     }, 600);
   }
 
   setPaused(p: boolean) {
-    if (!this.ctx) return;
-    this.master.gain.setTargetAtTime(p ? 0.15 : 0.7, this.ctx.currentTime, 0.1);
+    this.pausedDuck = p;
+    if (!this.ctx || this.isMuted()) return;
+    this.master.gain.setTargetAtTime(p ? this.volume * 0.21 : this.volume, this.ctx.currentTime, 0.1);
   }
 }
 

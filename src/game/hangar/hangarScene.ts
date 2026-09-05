@@ -1,5 +1,6 @@
 // ===== Сборка сцены ангара + анимации =====
 import * as THREE from 'three';
+import { disposeTankModel, isSharedBeamGeo } from '../tankModel';
 import {
   createHangarTextures,
   buildFloorPodium,
@@ -52,7 +53,8 @@ export function buildHangar(): HangarRig {
   group.add(buildWallDecor());
   const { group: lampG, lights: lampLights } = buildLamps(t);
   group.add(lampG);
-  group.add(buildBackgroundTanks(t));
+  const bgTanks = buildBackgroundTanks(t);
+  group.add(bgTanks.group);
   const weld = buildWeldCorner();
   group.add(weld.group);
   const dust = buildDust();
@@ -146,6 +148,10 @@ export function buildHangar(): HangarRig {
   const setInfo = (title: string, rows: string[]) => updateInfoStand(stand.boardMat, title, rows);
 
   const dispose = () => {
+    // фоновые танки — отдельными материалами, освобождаем явно
+    for (const tm of bgTanks.models) {
+      try { disposeTankModel(tm); } catch { /* */ }
+    }
     const seenTex = new Set<THREE.Texture>();
     group.traverse((o) => {
       const maybePoints = o as unknown as THREE.Points;
@@ -165,7 +171,10 @@ export function buildHangar(): HangarRig {
       }
       const mesh = o as unknown as THREE.Mesh;
       if (!mesh.isMesh) return;
-      mesh.geometry.dispose();
+      // общая геометрия луча фар — одна на все танки, не диспоузим
+      if (!isSharedBeamGeo(mesh.geometry as THREE.BufferGeometry)) {
+        try { mesh.geometry.dispose(); } catch { /* */ }
+      }
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       for (const m of mats) {
         if (!m || !m.userData.own) continue;

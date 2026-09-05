@@ -1,7 +1,8 @@
-import { BattleConfig, BIOMES, BIOME_NAMES, TIMES, TIME_NAMES, WEATHERS, WEATHER_NAMES, MODE_NAMES, GameMode, Duration, DURATION_NAMES, DURATION_SECONDS, TANKS, TankId } from '../game/config';
+import { BattleConfig, BIOMES, BIOME_NAMES, TIMES, TIME_NAMES, WEATHERS, WEATHER_NAMES, MODE_NAMES, GameMode, Duration, DURATION_NAMES, DURATION_SECONDS, TANKS, TankId, BOT_DIFFICULTIES, BOT_DIFFICULTY_NAMES, BOT_DIFFICULTY_SPECS, BotDifficulty } from '../game/config';
 import { Panel, Btn, Chip, Corner, fmtTime } from './common';
+import SettingsPanel from './SettingsPanel';
 
-type Setup = Pick<BattleConfig, 'mode' | 'bots' | 'biome' | 'time' | 'weather' | 'duration'>;
+type Setup = Pick<BattleConfig, 'mode' | 'bots' | 'botDifficulty' | 'biome' | 'time' | 'weather' | 'duration'>;
 
 interface Props {
   setup: Setup;
@@ -53,6 +54,17 @@ export default function BattleSetup({ setup, setSetup, tank, onBack, onStart }: 
               <input type="range" min={1} max={12} value={setup.bots} onChange={(e) => setSetup({ ...setup, bots: +e.target.value })} className="flex-1 accent-lime" />
               <span className="mono text-lime font-bold w-8 text-right">{setup.bots}</span>
             </div>
+            <div className="mt-4">
+              <div className="mono text-[10px] text-olive-300 tracking-wider uppercase mb-2">Сложность ботов</div>
+              <div className="grid grid-cols-3 gap-2">
+                {BOT_DIFFICULTIES.map((d: BotDifficulty) => (
+                  <Chip key={d} active={(setup.botDifficulty ?? 'veteran') === d} onClick={() => setSetup({ ...setup, botDifficulty: d })} className="!py-2 text-center">
+                    <div className="font-bold">{BOT_DIFFICULTY_NAMES[d]}</div>
+                    <div className="mono text-[9px] text-olive-300 mt-0.5 leading-tight">{BOT_DIFFICULTY_SPECS[d].desc}</div>
+                  </Chip>
+                ))}
+              </div>
+            </div>
             {setup.mode === 'capture' && (
               <div className="mt-4">
                 <div className="mono text-[10px] text-olive-300 tracking-wider uppercase mb-2">Длительность боя</div>
@@ -99,6 +111,8 @@ export default function BattleSetup({ setup, setSetup, tank, onBack, onStart }: 
               ))}
             </div>
           </Panel>
+
+          <SettingsPanel />
         </div>
 
         <div className="flex flex-col gap-3">
@@ -107,6 +121,7 @@ export default function BattleSetup({ setup, setSetup, tank, onBack, onStart }: 
               <Row k="Машина" v={`${TANKS[tank].name} · ${TANKS[tank].role}`} />
               <Row k="Режим" v={MODE_NAMES[setup.mode]} />
               <Row k="Противники" v={setup.mode === 'capture' ? `${red} красных` : `${setup.bots} ботов`} />
+              <Row k="Сложность" v={BOT_DIFFICULTY_NAMES[setup.botDifficulty ?? 'veteran']} />
               {setup.mode === 'capture' && <Row k="Союзники" v={`${blue} синих + вы`} />}
               {setup.mode === 'capture' && <Row k="Таймер" v={fmtTime(DURATION_SECONDS[setup.duration])} />}
               <Row k="Биом" v={BIOME_NAMES[setup.biome]} />

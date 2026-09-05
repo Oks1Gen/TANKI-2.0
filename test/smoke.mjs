@@ -1,6 +1,6 @@
 // Smoke-тест: гоняем движок без WebGL, проверяем отсутствие исключений
 import { build } from 'esbuild';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import path from 'path';
 import fs from 'fs';
 
@@ -41,7 +41,18 @@ await build({
 
 // ---- DOM-заглушки ----
 const noop = () => {};
-const ctx2d = new Proxy({}, { get: (_, k) => (k === 'canvas' ? {} : k === 'measureText' ? () => ({ width: 10 }) : k === 'getImageData' ? () => ({ data: new Uint8ClampedArray(4) }) : noop), set: () => true });
+const gradientStub = { addColorStop: noop };
+const ctx2d = new Proxy({ canvas: {}, fillStyle: '', strokeStyle: '', globalAlpha: 1, font: '', textAlign: '', textBaseline: '', shadowColor: '', shadowBlur: 0, lineWidth: 1 }, {
+  get: (t, k) => {
+    if (k === 'canvas') return {};
+    if (k === 'measureText') return () => ({ width: 10 });
+    if (k === 'getImageData') return () => ({ data: new Uint8ClampedArray(4) });
+    if (k === 'createRadialGradient' || k === 'createLinearGradient' || k === 'createPattern') return () => gradientStub;
+    if (k in t) return t[k];
+    return noop;
+  },
+  set: (t, k, v) => { try { t[k] = v; } catch {} return true; },
+});
 const makeCanvas = () => ({
   width: 256, height: 256, clientWidth: 1280, clientHeight: 720, style: {},
   getContext: (t) => (t === '2d' ? ctx2d : {}),
@@ -57,7 +68,7 @@ globalThis.requestAnimationFrame = (cb) => { rafCb = cb; return 1; };
 globalThis.cancelAnimationFrame = noop;
 globalThis.localStorage = { getItem: () => null, setItem: noop };
 
-const { run } = await import(path.join(root, 'test/out.mjs'));
+const { run } = await import(pathToFileURL(path.join(root, 'test/out.mjs')).href);
 await run(makeCanvas(), () => rafCb);
 fs.unlinkSync(path.join(root, 'test/out.mjs'));
 console.log('SMOKE OK');
