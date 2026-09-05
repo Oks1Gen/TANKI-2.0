@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { ARENA_SIZE, BattleConfig, Biome, TimeOfDay, Weather } from './config';
 
-export type ObstacleKind = 'building' | 'barrier' | 'crate' | 'rock' | 'tree' | 'hill' | 'wall';
+export type ObstacleKind = 'building' | 'hangar' | 'bunker' | 'concrete' | 'barrier' | 'crate' | 'rock' | 'tree' | 'hill' | 'wall';
 
 export interface Obstacle {
   id: number;
@@ -186,8 +186,8 @@ export function setupEnvironment(scene: THREE.Scene, cfg: BattleConfig): Environ
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
   sun.shadow.camera.near = 10;
-  sun.shadow.camera.far = 400;
-  const sh = 110;
+  sun.shadow.camera.far = 460;
+  const sh = ARENA_SIZE / 2 + 30;
   sun.shadow.camera.left = -sh;
   sun.shadow.camera.right = sh;
   sun.shadow.camera.top = sh;
@@ -230,7 +230,7 @@ function groundTexture(biome: Biome, rnd: () => number): THREE.Texture {
   }
   const t = new THREE.CanvasTexture(c);
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.repeat.set(14, 14);
+  t.repeat.set(Math.round((ARENA_SIZE * 3) / 36), Math.round((ARENA_SIZE * 3) / 36));
   t.colorSpace = THREE.SRGBColorSpace;
   t.anisotropy = 4;
   return t;
@@ -322,6 +322,7 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
   const isFree = (x: number, z: number, r: number) => {
     for (const rv of reserved) if (Math.hypot(rv.x - x, rv.z - z) < rv.r + r) return false;
     for (const o of obstacles) {
+      if (o.kind === 'wall') continue; // невидимые стены за краем арены — не блокируют застройку
       const d = Math.hypot(o.x - x, o.z - z);
       if (d < o.r + r + 2.5) return false;
     }
@@ -378,8 +379,8 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
     minimapObstacles.pop();
   }
 
-  // ---- Дороги ----
-  const roadCount = 2 + Math.floor(rnd() * 2);
+  // ---- Дороги (сетка между кварталами) ----
+  const roadCount = 3 + Math.floor(rnd() * 2);
   for (let i = 0; i < roadCount; i++) {
     const vertical = rnd() > 0.5;
     const off = (rnd() * 2 - 1) * half * 0.6;
@@ -392,14 +393,16 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
     scene.add(m);
   }
 
-  // ---- Здания ----
-  const buildingCount = 9 + Math.floor(rnd() * 4);
-  for (let i = 0; i < buildingCount; i++) {
-    const w = 8 + rnd() * 9;
-    const d = 8 + rnd() * 9;
-    const h = 5 + rnd() * 6;
-    const pos = place(Math.hypot(w, d) / 2);
-    if (!pos) continue;
+  // ---- Кварталы укрытий: дома, ангары, доты, бетон ----
+  const winMatShared = new THREE.MeshStandardMaterial({ color: 0x0d1418, emissive: env.isNight ? 0xffc870 : 0x000000, emissiveIntensity: env.isNight ? 1.2 : 0, roughness: 0.3 });
+  disposables.push(winMatShared);
+  const concreteMat = new THREE.MeshStandardMaterial({ color: 0x9a9a94, roughness: 0.95 });
+  disposables.push(concreteMat);
+  // рыжая крыша ангара — чтобы отличался от обычных домов издалека
+  const hangarRoofMat = new THREE.MeshStandardMaterial({ color: 0x8a4f36, roughness: 0.85 });
+  disposables.push(hangarRoofMat);
+
+  const makeHouse = (w: number, d: number, h: number) => {
     const g = new THREE.Group();
     const body = new THREE.Mesh(boxGeo, buildingMat);
     body.scale.set(w, h, d);
@@ -412,25 +415,141 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
     roof.position.y = h + 0.25;
     roof.castShadow = true;
     g.add(roof);
-    // окна
-    const winMat = new THREE.MeshStandardMaterial({ color: 0x0d1418, emissive: env.isNight ? 0xffc870 : 0x000000, emissiveIntensity: env.isNight && rnd() > 0.4 ? 1.2 : 0, roughness: 0.3 });
-    disposables.push(winMat);
     const rows = Math.max(1, Math.floor(h / 2.6));
     const cols = Math.max(1, Math.floor(w / 3));
     for (let r = 0; r < rows; r++)
       for (let c = 0; c < cols; c++) {
         for (const side of [-1, 1]) {
-          const win = new THREE.Mesh(boxGeo, winMat);
+          const win = new THREE.Mesh(boxGeo, winMatShared);
           win.scale.set(1.2, 1.4, 0.2);
           win.position.set(-w / 2 + (c + 0.5) * (w / cols), 1.6 + r * 2.6, side * (d / 2 + 0.05));
           g.add(win);
         }
       }
-    addBox('building', pos.x, pos.z, w, d, h, g, 900 + h * 60, true);
+    return g;
+  };
+  const makeHangar = (w: number, d: number, h: number) => {
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(boxGeo, buildingMat);
+    body.scale.set(w, h, d);
+    body.position.y = h / 2;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    g.add(body);
+    const roof = new THREE.Mesh(boxGeo, hangarRoofMat);
+    roof.scale.set(w + 1, 0.6, d + 1);
+    roof.position.y = h + 0.3;
+    roof.castShadow = true;
+    g.add(roof);
+    // ворота — тёмная ниша спереди
+    const door = new THREE.Mesh(boxGeo, winMatShared);
+    door.scale.set(w * 0.6, h * 0.7, 0.3);
+    door.position.set(0, h * 0.35, d / 2 + 0.1);
+    g.add(door);
+    return g;
+  };
+  const makeBunker = (w: number, d: number, h: number) => {
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(boxGeo, concreteMat);
+    body.scale.set(w, h, d);
+    body.position.y = h / 2;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    g.add(body);
+    const slab = new THREE.Mesh(boxGeo, barrierMat);
+    slab.scale.set(w + 0.8, 0.5, d + 0.8);
+    slab.position.y = h + 0.25;
+    slab.castShadow = true;
+    g.add(slab);
+    // амбразура
+    const slit = new THREE.Mesh(boxGeo, winMatShared);
+    slit.scale.set(w * 0.7, 0.4, 0.3);
+    slit.position.set(0, h * 0.65, d / 2 + 0.1);
+    g.add(slit);
+    return g;
+  };
+  const makeConcrete = (s: number) => {
+    const g = new THREE.Group();
+    const n = 1 + Math.floor(rnd() * 2);
+    for (let k = 0; k < n; k++) {
+      const m = new THREE.Mesh(boxGeo, concreteMat);
+      m.scale.set(s, s * 0.7, s);
+      m.position.set((rnd() - 0.5) * s, s * 0.35 + (k > 0 ? s * 0.7 : 0), (rnd() - 0.5) * s);
+      m.rotation.y = (rnd() - 0.5) * 0.4;
+      m.castShadow = true;
+      m.receiveShadow = true;
+      g.add(m);
+    }
+    return g;
+  };
+
+  // квартальная застройка: 4 квартала по углам + хаотичный центр
+  // даёт коридоры и укрытия от прямого прострела через всю карту
+  const quarters = [
+    { x: -half * 0.52, z: -half * 0.52 },
+    { x: half * 0.52, z: -half * 0.52 },
+    { x: -half * 0.52, z: half * 0.52 },
+    { x: half * 0.52, z: half * 0.52 },
+  ];
+  const tryPlaceNear = (cx: number, cz: number, spread: number, r: number): { x: number; z: number } | null => {
+    for (let i = 0; i < 30; i++) {
+      const x = cx + (rnd() * 2 - 1) * spread;
+      const z = cz + (rnd() * 2 - 1) * spread;
+      if (Math.abs(x) > half - 12 || Math.abs(z) > half - 12) continue;
+      if (isFree(x, z, r)) return { x, z };
+    }
+    return place(r);
+  };
+
+  for (const q of quarters) {
+    // 1-2 дома в квартале
+    const houses = 1 + Math.floor(rnd() * 2);
+    for (let i = 0; i < houses; i++) {
+      const w = 8 + rnd() * 6;
+      const d = 8 + rnd() * 6;
+      const h = 5 + rnd() * 5;
+      const pos = tryPlaceNear(q.x, q.z, 22, Math.hypot(w, d) / 2);
+      if (!pos) continue;
+      addBox('building', pos.x, pos.z, w, d, h, makeHouse(w, d, h), 900 + h * 60, true);
+    }
+    // 0-1 ангар между кварталами
+    if (rnd() > 0.4) {
+      const w = 16 + rnd() * 6;
+      const d = 10 + rnd() * 4;
+      const h = 5.5 + rnd() * 1.5;
+      const pos = tryPlaceNear(q.x * 0.55, q.z * 0.55, 26, Math.hypot(w, d) / 2);
+      if (pos) addBox('hangar', pos.x, pos.z, w, d, h, makeHangar(w, d, h), 1500, true);
+    }
+    // дот — низкий, прочный, идеален для hull-down
+    {
+      const w = 6 + rnd() * 2;
+      const d = 6 + rnd() * 2;
+      const h = 2.6 + rnd() * 0.6;
+      const pos = tryPlaceNear(q.x, q.z, 28, Math.hypot(w, d) / 2);
+      if (pos) addBox('bunker', pos.x, pos.z, w, d, h, makeBunker(w, d, h), 2500, true);
+    }
+    // 2-3 бетонных блока вокруг
+    for (let i = 0; i < 3; i++) {
+      const s = 2.6 + rnd() * 1.2;
+      const pos = tryPlaceNear(q.x, q.z, 30, s);
+      if (!pos) continue;
+      addBox('concrete', pos.x, pos.z, s * 1.3, s * 1.3, s * 0.7, makeConcrete(s), 500, true);
+    }
   }
 
-  // ---- Барьеры ----
-  for (let i = 0; i < 14; i++) {
+  // добрасываем одиночные дома в центре для баланса
+  const extraHouses = 3 + Math.floor(rnd() * 2);
+  for (let i = 0; i < extraHouses; i++) {
+    const w = 8 + rnd() * 9;
+    const d = 8 + rnd() * 9;
+    const h = 5 + rnd() * 6;
+    const pos = place(Math.hypot(w, d) / 2);
+    if (!pos) continue;
+    addBox('building', pos.x, pos.z, w, d, h, makeHouse(w, d, h), 900 + h * 60, true);
+  }
+
+  // ---- Барьеры (удлинённые, для перекрытия прострелов) ----
+  for (let i = 0; i < 18; i++) {
     const horizontal = rnd() > 0.5;
     const w = horizontal ? 7 + rnd() * 5 : 1.6;
     const d = horizontal ? 1.6 : 7 + rnd() * 5;
@@ -447,7 +566,7 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
   }
 
   // ---- Ящики ----
-  for (let i = 0; i < 18; i++) {
+  for (let i = 0; i < 22; i++) {
     const s = 2.2 + rnd() * 1.6;
     const pos = place(s, 10);
     if (!pos) continue;
@@ -464,8 +583,8 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
     addBox('crate', pos.x, pos.z, s * 1.2, s * 1.2, s, g, 120, true);
   }
 
-  // ---- Скалы ----
-  const rockCount = cfg.biome === 'mountains' ? 22 : cfg.biome === 'desert' ? 14 : 9;
+  // ---- Скалы (масштабировано под 210) ----
+  const rockCount = cfg.biome === 'mountains' ? 28 : cfg.biome === 'desert' ? 18 : 12;
   for (let i = 0; i < rockCount; i++) {
     const r = 2.5 + rnd() * 4;
     const pos = place(r, 10);
@@ -484,7 +603,7 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
   }
 
   // ---- Холмы внутри карты ----
-  const hillCount = cfg.biome === 'mountains' ? 6 : 3;
+  const hillCount = cfg.biome === 'mountains' ? 8 : 4;
   for (let i = 0; i < hillCount; i++) {
     const r = 7 + rnd() * 6;
     const pos = place(r, 16);
@@ -502,7 +621,7 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
   }
 
   // ---- Деревья ----
-  const treeCount = Math.floor(34 * p.treeDensity);
+  const treeCount = Math.floor(48 * p.treeDensity);
   const treeGeo = cfg.biome === 'winter' || cfg.biome === 'forest' ? new THREE.ConeGeometry(2.2, 7, 7) : new THREE.SphereGeometry(2.4, 7, 6);
   const trunkGeo = new THREE.CylinderGeometry(0.35, 0.5, 3, 6);
   disposables.push(treeGeo, trunkGeo);
@@ -563,29 +682,35 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
     capPoints.push({ id: i, letter: c.letter, x: c.x, z: c.z, radius, owner: -1, progress: 0, capturing: -1, contested: false, ring, beacon, fill, light, label, blockedTimer: 0 });
   });
 
-  // ---- Пикапы ----
+  // ---- Пикапы: для deathmatch — упор на ХП / урон 10с / скорость 10с ----
   const pickups: Pickup[] = [];
-  const types: PickupType['id'][] = ['repair', 'ammo', 'speed', 'damage', 'repair', 'ammo', 'speed', 'damage'];
+  const types: PickupType['id'][] =
+    cfg.mode === 'deathmatch'
+      ? ['repair', 'repair', 'repair', 'repair', 'damage', 'damage', 'damage', 'damage', 'speed', 'speed', 'speed', 'speed']
+      : ['repair', 'ammo', 'speed', 'damage', 'repair', 'ammo', 'speed', 'damage'];
   types.forEach((tid, i) => {
     const pos = place(2, 14, 60);
     if (!pos) return;
     const type = PICKUP_TYPES[tid];
     const g = new THREE.Group();
-    const mat = new THREE.MeshStandardMaterial({ color: type.color, emissive: type.color, emissiveIntensity: 0.8, roughness: 0.4, metalness: 0.3 });
+    const mat = new THREE.MeshStandardMaterial({ color: type.color, emissive: type.color, emissiveIntensity: 0.9, roughness: 0.4, metalness: 0.3 });
     disposables.push(mat);
     let geo: THREE.BufferGeometry;
     if (tid === 'repair') {
+      // крест — аптечка / ремкомплект
       geo = new THREE.BoxGeometry(0.5, 1.6, 0.5);
       const m1 = new THREE.Mesh(geo, mat);
       const m2 = new THREE.Mesh(geo, mat);
       m2.rotation.z = Math.PI / 2;
       g.add(m1, m2);
     } else if (tid === 'speed') {
+      // стрелка-форсаж
       geo = new THREE.ConeGeometry(0.8, 1.8, 4);
       const m1 = new THREE.Mesh(geo, mat);
       m1.rotation.x = Math.PI / 2;
       g.add(m1);
     } else if (tid === 'damage') {
+      // кристалл урона
       geo = new THREE.OctahedronGeometry(1, 0);
       g.add(new THREE.Mesh(geo, mat));
     } else {
@@ -593,10 +718,21 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
       g.add(new THREE.Mesh(geo, mat));
     }
     disposables.push(geo);
-    const base = new THREE.Mesh(new THREE.CylinderGeometry(1.8, 1.8, 0.15, 16), new THREE.MeshBasicMaterial({ color: type.color, transparent: true, opacity: 0.35 }));
+    const baseGeo = new THREE.CylinderGeometry(2.6, 2.6, 0.15, 20);
+    disposables.push(baseGeo);
+    const base = new THREE.Mesh(baseGeo, new THREE.MeshBasicMaterial({ color: type.color, transparent: true, opacity: 0.5 }));
     base.position.y = -1.1;
     g.add(base);
-    g.position.set(pos.x, 1.4, pos.z);
+    // световой столб — видно издалека на большой карте и за укрытиями
+    const beamGeo = new THREE.CylinderGeometry(1.2, 1.5, 22, 8, 1, true);
+    disposables.push(beamGeo);
+    const beamMat = new THREE.MeshBasicMaterial({ color: type.color, transparent: true, opacity: 0.32, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false });
+    disposables.push(beamMat);
+    const beam = new THREE.Mesh(beamGeo, beamMat);
+    beam.position.y = 10;
+    g.add(beam);
+    g.scale.setScalar(1.4);
+    g.position.set(pos.x, 1.6, pos.z);
     scene.add(g);
     pickups.push({ id: i, type, x: pos.x, z: pos.z, active: true, respawnIn: 0, mesh: g });
   });

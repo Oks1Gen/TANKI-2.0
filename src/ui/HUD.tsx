@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { HudSnapshot } from '../game/engine';
-import { SHELLS, SHELL_ORDER, ShellType } from '../game/config';
+import { SHELLS, SHELL_ORDER, ShellType, BOOST_DAMAGE_MUL, BOOST_SPEED_MUL } from '../game/config';
 import { fmtTime } from './common';
 
 interface Props {
@@ -34,7 +34,7 @@ export default function HUD({ s, staticMap }: Props) {
     }
     // препятствия
     for (const o of staticMap.obstacles) {
-      ctx.fillStyle = o.kind === 'building' ? 'rgba(142,160,140,0.55)' : o.kind === 'rock' || o.kind === 'hill' ? 'rgba(110,110,100,0.5)' : o.kind === 'tree' ? 'rgba(60,110,60,0.5)' : 'rgba(120,120,110,0.4)';
+      ctx.fillStyle = o.kind === 'building' || o.kind === 'hangar' ? 'rgba(142,160,140,0.55)' : o.kind === 'bunker' || o.kind === 'concrete' ? 'rgba(150,150,145,0.65)' : o.kind === 'rock' || o.kind === 'hill' ? 'rgba(110,110,100,0.5)' : o.kind === 'tree' ? 'rgba(60,110,60,0.5)' : 'rgba(120,120,110,0.4)';
       const w = Math.max(2, (o.w / (half * 2)) * W);
       const d = Math.max(2, (o.d / (half * 2)) * W);
       ctx.fillRect(sx(o.x) - w / 2, sy(o.z) - d / 2, w, d);
@@ -222,8 +222,8 @@ export default function HUD({ s, staticMap }: Props) {
       <div className="absolute left-4 bottom-4 flex flex-col gap-2 w-[300px]">
         {(s.boosts.speed > 0 || s.boosts.damage > 0) && (
           <div className="flex gap-2 mono text-[10px]">
-            {s.boosts.speed > 0 && <div className="border border-[#5ad8ff] text-[#5ad8ff] px-2 py-0.5 bg-olive-950/80">ФОРСАЖ {s.boosts.speed.toFixed(0)} с</div>}
-            {s.boosts.damage > 0 && <div className="border border-[#ff7a3c] text-[#ff7a3c] px-2 py-0.5 bg-olive-950/80">УРОН +30% {s.boosts.damage.toFixed(0)} с</div>}
+            {s.boosts.speed > 0 && <div className="border border-[#5ad8ff] text-[#5ad8ff] px-2 py-0.5 bg-olive-950/80">ФОРСАЖ +{Math.round((BOOST_SPEED_MUL - 1) * 100)}% {s.boosts.speed.toFixed(0)} с</div>}
+            {s.boosts.damage > 0 && <div className="border border-[#ff7a3c] text-[#ff7a3c] px-2 py-0.5 bg-olive-950/80">УРОН +{Math.round((BOOST_DAMAGE_MUL - 1) * 100)}% {s.boosts.damage.toFixed(0)} с</div>}
           </div>
         )}
         <div className="panel p-3">

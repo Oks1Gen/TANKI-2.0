@@ -246,5 +246,10 @@ export function computeStats(id: TankId, up: Record<UpgradeId, number>, goldUpgr
   };
 }
 
-export const ARENA_SIZE = 170; // сторона арены
+export const ARENA_SIZE = 210; // сторона арены (расширена для укрытий и пикапов)
+export const PICKUP_RESPAWN_DM = 18; // респаун бонусов в deathmatch
+export const PICKUP_RESPAWN_DEFAULT = 28; // респаун в остальных режимах
+export const BOOST_DURATION = 10; // длительность форсажа / усиленного заряда
+export const BOOST_SPEED_MUL = 1.35; // +35% скорости
+export const BOOST_DAMAGE_MUL = 1.5; // +50% урона
 export const BOT_NAMES = ['Гроза', 'Барс', 'Кедр', 'Молот', 'Сокол', 'Вихрь', 'Ястреб', 'Клин', 'Байкал', 'Тайфун', 'Кремень', 'Зубр', 'Рысь', 'Утёс'];

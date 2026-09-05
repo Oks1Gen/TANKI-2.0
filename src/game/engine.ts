@@ -4,7 +4,8 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import {
   BattleConfig, BattleResult, EffectiveStats, ShellType, SHELLS, SHELL_ORDER, TankId, TANKS, TankSpec, Team, computeStats,
-  DURATION_SECONDS, BOT_NAMES, UpgradeId,
+  DURATION_SECONDS, BOT_NAMES, UpgradeId, BOOST_DURATION, BOOST_DAMAGE_MUL, BOOST_SPEED_MUL,
+  PICKUP_RESPAWN_DM, PICKUP_RESPAWN_DEFAULT,
 } from './config';
 import { buildTank, TankModel, wreckify } from './tankModel';
 import { buildWorld, World, Obstacle, CapPoint, Pickup, mulberry } from './world';
@@ -303,6 +304,10 @@ export class GameEngine {
 
     this.camYaw = this.player.yaw;
     this.player.turretYaw = this.player.yaw;
+    if (this.cfg.mode === 'deathmatch') {
+      this.notify('Бонусы на карте: ✚ ремонт, ◆ урон +50% на 10 с, ➤ форсаж на 10 с — ищите световые столбы', 'info');
+      this.notify('Укрытия: дома, ангары с рыжей крышей, доты, бетонные блоки', 'info');
+    }
     this.bindInput();
     audio.init();
     audio.startEngine();
@@ -366,7 +371,7 @@ export class GameEngine {
         if (this.isEnemy(t, o)) minEnemy = Math.min(minEnemy, d);
         if (d < 12) minEnemy = 0;
       }
-      if (minEnemy < (this.cfg.mode === 'capture' ? 40 : 38) && i < 150) continue;
+      if (minEnemy < (this.cfg.mode === 'capture' ? 48 : 46) && i < 150) continue;
       t.x = x;
       t.z = z;
       found = true;
@@ -658,7 +663,7 @@ export class GameEngine {
     let speedMul = eng.broken ? 0.25 : eng.hp < 0.5 ? 0.7 : 1;
     if (trk.broken) speedMul *= 0.08;
     else if (trk.hp < 0.5) speedMul *= 0.6;
-    if (t.boostSpeed > 0) speedMul *= 1.35;
+    if (t.boostSpeed > 0) speedMul *= BOOST_SPEED_MUL;
     const maxF = t.stats.speed * speedMul;
     const maxR = t.stats.reverseSpeed * speedMul;
     const accel = t.stats.accel * (eng.broken ? 0.4 : 1);
@@ -817,7 +822,7 @@ export class GameEngine {
     mesh.position.copy(mp);
     this.scene.add(mesh);
     const light = null;
-    const dmgMul = t.boostDamage > 0 ? 1.3 : 1;
+    const dmgMul = t.boostDamage > 0 ? BOOST_DAMAGE_MUL : 1;
     this.projectiles.push({ x: mp.x, y: mp.y, z: mp.z, vx: dir.x * v, vy: dir.y * v, vz: dir.z * v, owner: t, shell: t.shell, damage: t.stats.damage * dmgMul, mesh, life: 6, light });
     // перезарядка / магазин
     t.clip -= 1;
@@ -1040,14 +1045,15 @@ export class GameEngine {
     const h = o.h;
     this.scene.remove(o.mesh);
     // обломки
-    const col = o.kind === 'crate' ? 0x6a4a2a : o.kind === 'building' ? 0x7a7568 : 0x8a8a84;
-    this.debris.burst(x, h * 0.3, z, o.kind === 'building' ? 14 : 6, o.kind === 'building' ? 9 : 6, col, o.kind === 'building' ? 2 : 1);
-    this.particles.emit({ x, y: h * 0.4, z, vy: 4, spread: o.r * 1.5, color: 0xb0a898, life: 2.5, size: 3, grow: 6, drag: 0.6, alpha: 0.7, count: o.kind === 'building' ? 40 : 12 });
+    const col = o.kind === 'crate' ? 0x6a4a2a : o.kind === 'building' || o.kind === 'hangar' ? 0x7a7568 : 0x8a8a84;
+    const bigRuins = o.kind === 'building' || o.kind === 'hangar';
+    this.debris.burst(x, h * 0.3, z, bigRuins ? 14 : 6, bigRuins ? 9 : 6, col, bigRuins ? 2 : 1);
+    this.particles.emit({ x, y: h * 0.4, z, vy: 4, spread: o.r * 1.5, color: 0xb0a898, life: 2.5, size: 3, grow: 6, drag: 0.6, alpha: 0.7, count: bigRuins ? 40 : 12 });
     this.particles.emit({ x, y: h * 0.4, z, vy: 6, spread: o.r, color: 0xff9040, life: 0.4, size: 3, grow: 12, count: 6 });
     // руины
     const rubble = new THREE.Group();
     const mat = new THREE.MeshStandardMaterial({ color: col, roughness: 1 });
-    const n = o.kind === 'building' ? 7 : 3;
+    const n = bigRuins ? 7 : 3;
     for (let i = 0; i < n; i++) {
       const m = new THREE.Mesh(new THREE.BoxGeometry(1 + Math.random() * o.hw, 0.5 + Math.random() * 1.2, 1 + Math.random() * o.hd), mat);
       m.position.set((Math.random() - 0.5) * o.hw * 1.4, 0.4, (Math.random() - 0.5) * o.hd * 1.4);
@@ -1063,9 +1069,10 @@ export class GameEngine {
     this.scene.add(rubble);
     o.mesh = rubble;
     const dist = Math.hypot(x - this.player.x, z - this.player.z);
-    audio.explosion(o.kind === 'building' ? 1.3 : 0.6, clamp(1 - dist / 140, 0.2, 1));
-    if (o.kind === 'building') this.camShake = Math.max(this.camShake, clamp(1 - dist / 60, 0, 0.8));
-    if (attacker.isPlayer) this.notify(o.kind === 'building' ? 'Здание разрушено' : o.kind === 'barrier' ? 'Барьер уничтожен' : 'Ящики уничтожены', 'info');
+    const big = o.kind === 'building' || o.kind === 'hangar';
+    audio.explosion(big ? 1.3 : 0.6, clamp(1 - dist / 140, 0.2, 1));
+    if (big) this.camShake = Math.max(this.camShake, clamp(1 - dist / 60, 0, 0.8));
+    if (attacker.isPlayer) this.notify(big ? 'Здание разрушено' : o.kind === 'bunker' ? 'Дот уничтожен' : o.kind === 'concrete' ? 'Бетон разбит' : o.kind === 'barrier' ? 'Барьер уничтожен' : 'Ящики уничтожены', 'info');
   }
 
   private killTank(t: Tank, attacker: Tank) {
@@ -1134,7 +1141,7 @@ export class GameEngine {
 
   private applyPickup(t: Tank, pk: Pickup) {
     pk.active = false;
-    pk.respawnIn = 28;
+    pk.respawnIn = this.cfg.mode === 'deathmatch' ? PICKUP_RESPAWN_DM : PICKUP_RESPAWN_DEFAULT;
     pk.mesh.visible = false;
     let text = '';
     switch (pk.type.id) {
@@ -1147,12 +1154,12 @@ export class GameEngine {
         text = 'Ремкомплект: +40% прочности, модули восстановлены';
         break;
       case 'speed':
-        t.boostSpeed = 14;
-        text = 'Форсаж: +35% скорости на 14 с';
+        t.boostSpeed = BOOST_DURATION;
+        text = `Форсаж: +${Math.round((BOOST_SPEED_MUL - 1) * 100)}% скорости на ${BOOST_DURATION} с`;
         break;
       case 'damage':
-        t.boostDamage = 14;
-        text = 'Усиленный заряд: +30% урона на 14 с';
+        t.boostDamage = BOOST_DURATION;
+        text = `Усиленный заряд: +${Math.round((BOOST_DAMAGE_MUL - 1) * 100)}% урона на ${BOOST_DURATION} с`;
         break;
       case 'ammo':
         (Object.keys(t.ammo) as ShellType[]).forEach((k) => (t.ammo[k] = Math.min(t.stats.ammo[k], t.ammo[k] + Math.ceil(t.stats.ammo[k] * 0.5))));
@@ -1348,6 +1355,26 @@ export class GameEngine {
       }
     }
 
+    // ---- бонусы: боты тоже охотятся за пикапами ----
+    {
+      const hpRatio = t.hp / t.maxHp;
+      let want: ('repair' | 'damage' | 'speed')[] | null = null;
+      if (hpRatio < 0.5) want = ['repair'];
+      else if (t.boostDamage <= 0 && (!target || distT > 40) && Math.random() < 0.6) want = ['damage', 'speed'];
+      else if (!target && Math.random() < 0.4) want = ['repair', 'damage', 'speed'];
+      if (want && (ai.state === 'wander' || ai.state === 'objective' || hpRatio < 0.4 || distT > 45)) {
+        const pk = this.findNearestPickup(t.x, t.z, want, 90);
+        if (pk) {
+          ai.moveTarget = { x: pk.x, z: pk.z };
+          // если далеко от боя — едем за бонусом, но продолжаем стрелять по цели
+          if (ai.state === 'engage' && distT > 35) {
+            ai.state = 'wander';
+            ai.stateTimer = 1.5;
+          }
+        }
+      }
+    }
+
     // ---- целевая точка движения ----
     let mt = ai.moveTarget;
     if (ai.state === 'engage' && target) {
@@ -1514,7 +1541,7 @@ export class GameEngine {
     for (const o of this.world.obstacles) {
       if (!o.alive || o.kind === 'wall' || o.kind === 'tree' || o.h < 2.5) continue;
       const d = Math.hypot(o.x - t.x, o.z - t.z);
-      if (d > 45) continue;
+      if (d > 55) continue;
       const ax = o.x - enemy.x, az = o.z - enemy.z;
       const l = Math.hypot(ax, az) || 1;
       const px = o.x + (ax / l) * (o.r + t.spec.radius + 2);
@@ -1523,6 +1550,21 @@ export class GameEngine {
       if (d < bestD) {
         bestD = d;
         best = { x: px, z: pz };
+      }
+    }
+    return best;
+  }
+
+  private findNearestPickup(x: number, z: number, want: ('repair' | 'damage' | 'speed')[], maxDist: number): Pickup | null {
+    let best: Pickup | null = null;
+    let bestD = maxDist;
+    for (const pk of this.world.pickups) {
+      if (!pk.active) continue;
+      if (!want.includes(pk.type.id as 'repair' | 'damage' | 'speed')) continue;
+      const d = Math.hypot(pk.x - x, pk.z - z);
+      if (d < bestD) {
+        bestD = d;
+        best = pk;
       }
     }
     return best;
