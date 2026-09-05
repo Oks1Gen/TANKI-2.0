@@ -174,7 +174,7 @@ const PALETTES: Record<Biome, BiomePalette> = {
 };
 
 // ---------- Освещение по времени суток ----------
-interface TimePreset {
+export interface TimePreset {
   sky: number;
   fog: number;
   sun: number;
@@ -188,7 +188,8 @@ interface TimePreset {
   night: boolean;
 }
 
-const TIME_PRESETS: Record<TimeOfDay, TimePreset> = {
+/** Единый источник правды для превью освещения в настройке боя (sky/night/sunI). */
+export const TIME_PRESETS: Record<TimeOfDay, TimePreset> = {
   night: { sky: 0x070a12, fog: 0x0a0e18, sun: 0x8090c0, sunI: 0.25, elev: 0.5, azim: 2.2, hemiSky: 0x1a2340, hemiGround: 0x0a0c10, hemiI: 0.35, amb: 0x0d1220, night: true },
   dawn: { sky: 0x6e6f9a, fog: 0x8d7f93, sun: 0xffa070, sunI: 1.0, elev: 0.18, azim: 1.0, hemiSky: 0x7a7fa8, hemiGround: 0x3a3230, hemiI: 0.55, amb: 0x302838, night: false },
   morning: { sky: 0x9cc0e6, fog: 0xb9cbe0, sun: 0xfff0d0, sunI: 1.8, elev: 0.55, azim: 1.1, hemiSky: 0x9cc0e6, hemiGround: 0x4a4a3a, hemiI: 0.6, amb: 0x3a4048, night: false },

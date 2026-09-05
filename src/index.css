@@ -16,106 +16,477 @@
   --color-danger: #ff4d4d;
   --color-team-blue: #4aa3ff;
   --color-team-red: #ff5a5a;
+
   --font-display: 'Rajdhani', 'Arial Narrow', sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  /* ---- Design-system v2: shape & depth ---- */
+  --radius-panel: 8px;
+  --radius-control: 6px;
+  --shadow-panel: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.55);
+  --shadow-cta: 0 0 20px rgba(185, 255, 61, 0.25), 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+
+:root {
+  --radius-panel: 8px;
+  --radius-control: 6px;
+  --shadow-panel: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-pop: 0 12px 40px rgba(0, 0, 0, 0.55);
+  /* Семантика цвета: lime — только CTA / успех / HP>50%.
+     amber — золото и предупреждения. team-blue/red — только команды. */
+  --text-strong: #edf2e8;
+  --text-primary: #c2cebd;
+  --text-dim: #8ea08c;
+  --text-faint: #5c6f5e;
+  --line-soft: rgba(142, 160, 140, 0.18);
+  --line-lime: rgba(185, 255, 61, 0.35);
 }
 
 html, body, #root {
   height: 100%;
   margin: 0;
   background: #080b08;
-  color: #c2cebd;
+  color: var(--text-primary);
   font-family: var(--font-display);
+  font-size: 15px;
+  line-height: 1.45;
   overflow: hidden;
   user-select: none;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 * { box-sizing: border-box; }
 
 canvas { display: block; }
 
+h1, h2, h3 {
+  color: var(--text-strong);
+  line-height: 1.05;
+  margin: 0;
+}
+
+/* Типографическая шкала v2: 3 уровня.
+   Display 28–48 / Body 14–16 / Caption 11–12 mono.
+   Кегль 9–10px запрещён для важных данных — только декоративные подписи. */
+.display-xl {
+  font-size: clamp(28px, 4vw, 48px);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--text-strong);
+}
+.display-md {
+  font-size: clamp(22px, 2.6vw, 32px);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--text-strong);
+}
+.body-md { font-size: 14px; line-height: 1.5; color: var(--text-primary); }
+.caption {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.t-strong { color: var(--text-strong); }
+.t-dim { color: var(--text-dim); }
+.t-faint { color: var(--text-faint); }
+
+/* Доступность: видимый фокус везде */
+:where(button, input, select, a, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-lime);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ---------- Панели ---------- */
+/* По умолчанию — скругление + глубина. Срез углов — только .panel-cut */
 .panel {
-  background: linear-gradient(180deg, rgba(27, 38, 29, 0.92), rgba(13, 18, 14, 0.94));
-  border: 1px solid rgba(185, 255, 61, 0.18);
+  background: linear-gradient(180deg, rgba(27, 38, 29, 0.94), rgba(13, 18, 14, 0.96));
+  border: 1px solid rgba(185, 255, 61, 0.14);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-panel), inset 0 1px 0 rgba(255, 255, 255, 0.06);
   position: relative;
-  clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
 }
 .panel::before {
   content: '';
   position: absolute;
   inset: 0;
+  border-radius: inherit;
   pointer-events: none;
-  background: repeating-linear-gradient(135deg, transparent 0 14px, rgba(185, 255, 61, 0.025) 14px 16px);
+  background: repeating-linear-gradient(135deg, transparent 0 14px, rgba(185, 255, 61, 0.02) 14px 16px);
+}
+/* верхний блик для «дорогого» металла */
+.panel::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 8px;
+  right: 8px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.12), transparent);
+}
+/* Вариант со срезом — только для CTA-шапок и главной кнопки. Не использовать повсеместно. */
+.panel-cut {
+  border-radius: 0;
+  clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
 }
 
 .panel-title {
   font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.22em;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: #7fb52a;
+  color: #9dc63a;
 }
 
+/* ---------- Кнопки ---------- */
 .btn {
   font-family: var(--font-display);
   font-weight: 700;
+  font-size: 14px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  border: 1px solid rgba(185, 255, 61, 0.35);
-  background: rgba(38, 52, 39, 0.7);
-  color: #c2cebd;
+  line-height: 1;
+  border: 1px solid rgba(185, 255, 61, 0.28);
+  border-radius: var(--radius-control);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 55%),
+    rgba(38, 52, 39, 0.7);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  color: var(--text-primary);
   padding: 10px 18px;
   cursor: pointer;
-  transition: all 0.12s ease;
-  clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
+  transition: background 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease, transform 0.06s ease, color 0.12s ease;
 }
-.btn:hover { background: rgba(185, 255, 61, 0.14); color: #b9ff3d; border-color: #b9ff3d; }
+.btn:hover {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.09), transparent 55%),
+    rgba(185, 255, 61, 0.14);
+  color: var(--color-lime);
+  border-color: var(--color-lime);
+  box-shadow: 0 0 0 1px rgba(185, 255, 61, 0.22), 0 4px 16px rgba(0, 0, 0, 0.4);
+}
 .btn:active { transform: translateY(1px); }
-.btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.btn-primary { background: #b9ff3d; color: #0d120e; border-color: #b9ff3d; box-shadow: 0 0 20px rgba(185, 255, 61, 0.25); }
-.btn-primary:hover { background: #d6ff7a; color: #0d120e; }
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: saturate(0.6);
+  transform: none;
+}
+/* CTA — единственное место со срезом углов + свечением */
+.btn-primary {
+  background: linear-gradient(180deg, #c8ff5a, #b9ff3d 60%, #a4e834);
+  color: #0d120e;
+  border-color: #d6ff7a;
+  border-radius: 0;
+  clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+  box-shadow: var(--shadow-cta), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+.btn-primary:hover {
+  background: linear-gradient(180deg, #dcff8a, #d6ff7a 60%, #b9ff3d);
+  color: #0d120e;
+  border-color: #eaffb0;
+  box-shadow: 0 0 26px rgba(185, 255, 61, 0.4), 0 6px 20px rgba(0, 0, 0, 0.45);
+}
 .btn-danger { border-color: rgba(255, 77, 77, 0.5); }
-.btn-danger:hover { background: rgba(255, 77, 77, 0.15); color: #ff4d4d; border-color: #ff4d4d; }
+.btn-danger:hover { background: rgba(255, 77, 77, 0.15); color: #ff4d4d; border-color: #ff4d4d; box-shadow: 0 0 0 1px rgba(255,77,77,0.25); }
 
+/* ---------- Чипы / сегменты ---------- */
 .chip {
   font-family: var(--font-mono);
   font-size: 11px;
   letter-spacing: 0.08em;
-  padding: 6px 10px;
-  border: 1px solid rgba(142, 160, 140, 0.25);
-  background: rgba(19, 27, 21, 0.8);
-  color: #8ea08c;
+  padding: 7px 11px;
+  border: 1px solid rgba(142, 160, 140, 0.28);
+  border-radius: var(--radius-control);
+  background: rgba(19, 27, 21, 0.85);
+  color: var(--text-dim);
   cursor: pointer;
   transition: all 0.12s ease;
   text-transform: uppercase;
+  line-height: 1.2;
 }
-.chip:hover { border-color: rgba(185, 255, 61, 0.5); color: #c2cebd; }
-.chip.active { border-color: #b9ff3d; color: #b9ff3d; background: rgba(185, 255, 61, 0.1); box-shadow: inset 0 0 12px rgba(185, 255, 61, 0.08); }
+.chip:hover { border-color: rgba(185, 255, 61, 0.5); color: var(--text-primary); }
+.chip:disabled { opacity: 0.4; cursor: not-allowed; }
+.chip:disabled:hover { border-color: rgba(142, 160, 140, 0.28); color: var(--text-dim); }
+.chip.active {
+  border-color: var(--color-lime);
+  color: var(--color-lime);
+  background: rgba(185, 255, 61, 0.1);
+  box-shadow: inset 0 0 12px rgba(185, 255, 61, 0.08), 0 0 0 1px rgba(185, 255, 61, 0.18);
+}
 
 .mono { font-family: var(--font-mono); }
 
-.bar { height: 6px; background: rgba(0, 0, 0, 0.5); border: 1px solid rgba(142, 160, 140, 0.2); position: relative; overflow: hidden; }
-.bar > i { position: absolute; left: 0; top: 0; bottom: 0; background: #b9ff3d; transition: width 0.2s ease; }
+/* ---------- Бары ---------- */
+.bar {
+  height: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(142, 160, 140, 0.22);
+  border-radius: 999px;
+  position: relative;
+  overflow: hidden;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+.bar > i {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #7fb52a, #b9ff3d);
+  box-shadow: 0 0 8px rgba(185, 255, 61, 0.35);
+  transition: width 0.2s ease;
+}
 
 .grid-bg {
   background-color: #080b08;
   background-image:
+    radial-gradient(ellipse at 50% 0%, rgba(185, 255, 61, 0.06), transparent 60%),
     linear-gradient(rgba(185, 255, 61, 0.04) 1px, transparent 1px),
     linear-gradient(90deg, rgba(185, 255, 61, 0.04) 1px, transparent 1px);
-  background-size: 40px 40px;
+  background-size: 100% 100%, 40px 40px, 40px 40px;
 }
 
+/* Scanlines — только для экрана загрузки. Не вешать на ангар/сетап: убивает читаемость. */
+.scanlines { position: relative; }
 .scanlines::after {
   content: '';
   position: absolute;
   inset: 0;
+  border-radius: inherit;
   pointer-events: none;
-  background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.12) 0 1px, transparent 1px 3px);
-  mix-blend-mode: multiply;
+  background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.08) 0 1px, transparent 1px 3px);
 }
 
-.glow-lime { text-shadow: 0 0 12px rgba(185, 255, 61, 0.6); }
-.glow-red { text-shadow: 0 0 12px rgba(255, 77, 77, 0.7); }
+/* Свечение — только для CTA и наград. Заголовки его не используют. */
+.glow-lime { text-shadow: 0 0 10px rgba(185, 255, 61, 0.35); }
+.glow-lime-strong { text-shadow: 0 0 18px rgba(185, 255, 61, 0.65); }
+.glow-red { text-shadow: 0 0 10px rgba(255, 77, 77, 0.45); }
+
+/* ---------- Формы в стиле штаба ---------- */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(185, 255, 61, 0.55), rgba(185, 255, 61, 0.15));
+  outline-offset: 4px;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #b9ff3d;
+  border: 2px solid #0d120e;
+  box-shadow: 0 0 0 1px rgba(185, 255, 61, 0.6), 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #b9ff3d;
+  border: 2px solid #0d120e;
+  box-shadow: 0 0 0 1px rgba(185, 255, 61, 0.6);
+}
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(185, 255, 61, 0.25);
+}
+
+input[type="checkbox"] {
+  accent-color: #b9ff3d;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+select {
+  background: rgba(19, 27, 21, 0.9);
+  border: 1px solid rgba(142, 160, 140, 0.3);
+  border-radius: var(--radius-control);
+  color: var(--text-primary);
+  padding: 6px 8px;
+}
+select option {
+  background: #0d120e;
+  color: #c2cebd;
+}
+
+.divider { border-top: 1px solid var(--line-soft); }
+.cta-glow { box-shadow: 0 0 24px rgba(185, 255, 61, 0.35); }
+
+/* ---------- Ангар: сетка и модалки (пункт B) ---------- */
+/* Резиновая сетка: 3 колонки на десктопе, стек на планшете/мобиле. */
+.hangar-grid {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  grid-template-columns: 1fr;
+  grid-template-rows: auto auto auto;
+}
+@media (min-width: 1024px) {
+  .hangar-grid {
+    overflow: hidden;
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-columns: 300px minmax(0, 1fr) 360px;
+  }
+  .hangar-col-scroll { min-height: 0; overflow-y: auto; }
+}
+@media (min-width: 1024px) and (max-width: 1365px) {
+  .hangar-grid {
+    grid-template-columns: 264px minmax(0, 1fr) 320px;
+    gap: 12px;
+    padding: 12px;
+  }
+}
+.hangar-center { min-height: 440px; }
+@media (min-width: 1024px) {
+  .hangar-center { min-height: 0; }
+}
+@media (max-width: 1023px) {
+  .hangar-center { height: 480px; }
+}
+
+/* ---------- Настройка боя: сетка + sticky-сводка (пункт C) ---------- */
+/* Один скролл на всю страницу; сводка прилипает сверху на десктопе. */
+.setup-grid {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+}
+@media (min-width: 1024px) {
+  .setup-grid {
+    grid-template-columns: minmax(0, 1fr) 340px;
+  }
+  .setup-summary {
+    position: sticky;
+    top: 0;
+  }
+}
+@media (min-width: 1024px) and (max-width: 1365px) {
+  .setup-grid {
+    grid-template-columns: minmax(0, 1fr) 310px;
+    gap: 12px;
+    padding: 12px;
+  }
+}
+
+/* Модалка в стиле штаба: единая ширина, скролл внутри. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(4, 7, 4, 0.72);
+  backdrop-filter: blur(3px);
+  animation: fade-in 0.18s ease-out;
+}
+.modal-panel {
+  width: min(480px, 94vw);
+  max-height: 88vh;
+  overflow-y: auto;
+  box-shadow: var(--shadow-pop), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  animation: modal-in 0.22s cubic-bezier(0.2, 1.2, 0.4, 1);
+}
+.modal-wide { width: min(560px, 94vw); }
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Сегмент-контроль табов. */
+.seg {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  padding: 6px;
+  background: rgba(13, 18, 14, 0.85);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-panel);
+}
+.seg-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 4px;
+  border-radius: var(--radius-control);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  line-height: 1.2;
+  transition: all 0.12s ease;
+}
+.seg-btn:hover { color: var(--text-primary); border-color: rgba(185, 255, 61, 0.35); }
+.seg-btn.active {
+  color: var(--color-lime);
+  border-color: var(--color-lime);
+  background: rgba(185, 255, 61, 0.1);
+  box-shadow: inset 0 0 12px rgba(185, 255, 61, 0.08);
+}
+.seg-icon { font-size: 15px; line-height: 1; }
+.seg-label { font-size: 10px; }
+
+/* Карточка танка: силуэт + цифры. Кнопка выбора — отдельно от зоны покупки. */
+.tank-pick {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  border-radius: var(--radius-control);
+}
+.tank-pick:focus-visible { outline: 2px solid var(--color-lime); outline-offset: 2px; }
+
+/* Дропдаун аккаунтов. */
+.account-pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  width: 260px;
+  z-index: 50;
+  animation: modal-in 0.16s ease-out;
+}
+
+/* Дельта прокачки в ТТХ. */
+.delta-up { color: #b9ff3d; }
+.delta-down-good { color: #7ad0ff; }
+.delta-bad { color: #ff5a5a; }
+
+/* Нижняя ским-подложка центра для читаемости поверх 3D. */
+.hangar-scrim {
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.72) 0%, rgba(0, 0, 0, 0.35) 55%, transparent 100%);
+}
 
 @keyframes pulse-lime { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 .pulse { animation: pulse-lime 1.2s ease-in-out infinite; }
@@ -153,6 +524,14 @@ canvas { display: block; }
 .rank-star:nth-child(4) { animation-delay: 0.36s; }
 .rank-star:nth-child(5) { animation-delay: 0.48s; }
 
-::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: #0d120e; }
-::-webkit-scrollbar-thumb { background: #3a4c3a; }
+::-webkit-scrollbar-thumb { background: #3a4c3a; border-radius: 999px; border: 1px solid #0d120e; }
+::-webkit-scrollbar-thumb:hover { background: #58705a; }
+
+/* Уважение к reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .pulse, .slide-in, .fade-in, .scan-bar, .promo-card, .promo-title, .promo-badge, .rank-star {
+    animation: none;
+  }
+}

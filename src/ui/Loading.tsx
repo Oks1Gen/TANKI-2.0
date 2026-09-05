@@ -45,11 +45,11 @@ export default function Loading({ cfg, ready, onDone }: { cfg: BattleConfig; rea
 
   const step = STEPS[Math.min(STEPS.length - 1, Math.floor(p * STEPS.length))];
   return (
-    <div className="absolute inset-0 flex items-center justify-center bg-olive-950/70 backdrop-blur-[2px] fade-in">
+    <div className="absolute inset-0 flex items-center justify-center bg-olive-950/70 backdrop-blur-[2px] fade-in scanlines">
       <div className="panel p-8 w-[560px] relative">
         <Corner />
         <div className="panel-title">Загрузка операции</div>
-        <div className="text-3xl font-bold tracking-[0.2em] text-olive-200 mt-1 glow-lime">{MODE_NAMES[cfg.mode].toUpperCase()}</div>
+        <div className="text-3xl font-bold tracking-[0.2em] text-olive-200 mt-1">{MODE_NAMES[cfg.mode].toUpperCase()}</div>
         <div className="grid grid-cols-2 gap-x-6 gap-y-1 mt-4 mono text-[11px]">
           <K k="Машина" v={TANKS[cfg.tank].name} />
           <K k="Боты" v={String(cfg.bots)} />

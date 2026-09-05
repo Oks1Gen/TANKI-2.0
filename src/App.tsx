@@ -98,50 +98,31 @@ export default function App() {
     });
   };
 
-  const createAccount = () => {
-    let name: string | null = null;
-    let count = 1;
-    try {
-      count = Object.keys(profiles?.accounts ?? {}).length;
-    } catch {
-      count = 1;
-    }
-    try {
-      name = window.prompt('Название нового аккаунта:', `ИГРОК ${count}`);
-    } catch {
-      return;
-    }
-    if (name === null) return;
+  const createAccount = (name: string): string | null => {
     const clean = name.trim().slice(0, 16);
     if (!clean) {
       audio.ui('deny');
-      try { window.alert('Имя не должно быть пустым.'); } catch { /* */ }
-      return;
+      return 'Имя не должно быть пустым.';
     }
     if (!isValidAccountName(clean)) {
       audio.ui('deny');
-      try { window.alert('Недопустимое имя аккаунта.'); } catch { /* */ }
-      return;
+      return 'Недопустимое имя аккаунта.';
     }
     const next = addAccount(profiles, clean);
     if (!next) {
       audio.ui('deny');
-      try { window.alert(`Имя «${clean}» уже занято.`); } catch { /* */ }
-      return;
+      return `Имя «${clean}» уже занято.`;
     }
     audio.init();
     audio.ui('confirm');
     saveProfiles(next);
     setProfiles(next);
+    return null;
   };
 
+  // Подтверждение удаления — в модалке ангара, здесь только действие.
   const deleteAccount = () => {
     if (profiles.current === ADMIN_NAME) return audio.ui('deny');
-    try {
-      if (!window.confirm(`Удалить аккаунт «${profiles.current}» со всем прогрессом?`)) return;
-    } catch {
-      /* без confirm — продолжаем */
-    }
     const next = removeAccount(profiles, profiles.current);
     if (!next) return audio.ui('deny');
     audio.ui('click');
@@ -167,19 +148,21 @@ export default function App() {
     }
   };
 
-  const importSave = (file: File) => {
-    file.text().then((text) => {
+  // Возвращает текст ошибки или null при успехе — ошибку показывает модалка ангара.
+  const importSave = (file: File): Promise<string | null> => {
+    return file.text().then((text) => {
       const parsed = importProfilesJson(text);
       if (!parsed) {
         audio.ui('deny');
-        try { window.alert('Не удалось прочитать бэкап: неверный файл.'); } catch { /* */ }
-        return;
+        return 'Не удалось прочитать бэкап: неверный файл.';
       }
       saveProfiles(parsed);
       setProfiles(parsed);
       audio.ui('confirm');
+      return null;
     }).catch(() => {
       audio.ui('deny');
+      return 'Не удалось прочитать файл бэкапа.';
     });
   };
 

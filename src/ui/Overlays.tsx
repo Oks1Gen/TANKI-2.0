@@ -68,7 +68,7 @@ export function PauseOverlay({ onResume, onMenu, onSettings }: { onResume: () =>
       <div className="panel p-8 w-[420px] relative text-center">
         <Corner />
         <div className="panel-title">Связь со штабом</div>
-        <div className="text-4xl font-bold tracking-[0.3em] text-olive-200 mt-1 glow-lime">ПАУЗА</div>
+        <div className="text-4xl font-bold tracking-[0.3em] text-olive-200 mt-1">ПАУЗА</div>
         <div className="mono text-[11px] text-olive-300 mt-2">Бой приостановлен. Противник ожидает вашего решения.</div>
         <div className="flex flex-col gap-2 mt-6">
           <Btn variant="primary" onClick={onResume}>▶ Продолжить бой (Esc)</Btn>

@@ -286,17 +286,17 @@ export default function TankPreview({ tank, camo, className }: Props) {
         className="absolute inset-0 pointer-events-none"
         style={{ background: 'radial-gradient(ellipse at 50% 42%, transparent 55%, rgba(0,0,0,0.5) 100%)' }}
       />
-      {/* пресеты камеры */}
-      <div className="absolute left-1/2 -translate-x-1/2 top-3 flex gap-1 pointer-events-auto">
+      {/* пресеты камеры: внизу по центру, пилюля, полупрозрачные — не спорят с названием танка */}
+      <div className="absolute left-1/2 -translate-x-1/2 bottom-[224px] sm:bottom-[196px] lg:bottom-[136px] flex gap-1 p-1 rounded-full border border-olive-500/30 bg-olive-950/60 backdrop-blur-md pointer-events-auto shadow-[0_8px_24px_rgba(0,0,0,0.45)]">
         {PRESETS.map((p) => (
           <button
             key={p.id}
             onClick={() => applyPreset(p.id)}
             onMouseEnter={() => audio.ui('hover')}
-            className={`mono text-[10px] tracking-[0.15em] uppercase px-3 py-1.5 border backdrop-blur-sm transition-all cursor-pointer ${
+            className={`mono text-[11px] tracking-[0.15em] uppercase px-3 py-1.5 rounded-full border transition-all cursor-pointer ${
               preset === p.id
-                ? 'border-lime text-lime bg-lime/10 shadow-[inset_0_0_12px_rgba(185,255,61,0.08)]'
-                : 'border-olive-500/40 text-olive-300 bg-olive-900/80 hover:border-olive-300/60 hover:text-olive-200'
+                ? 'border-lime text-lime bg-lime/15'
+                : 'border-transparent text-olive-300 hover:text-olive-200 hover:bg-olive-800/70'
             }`}
           >
             {p.label}
