@@ -167,6 +167,13 @@ function ballisticPitch(v: number, d: number, h: number) {
   return Math.atan((v * v - Math.sqrt(disc)) / (G * d));
 }
 
+// Углы вертикальной наводки. Склонение расширено, чтобы дуло доставало до корпуса
+// и можно было бить по земле/низким целям в упор (раньше было всего -0.1 ≈ -6°).
+// Финальный предел вниз — касание своего корпуса (см. clampPitchForHull).
+const GUN_ELEV_MAX = 0.45;
+const GUN_DEP_MIN = -0.42;
+const GUN_DEP_MIN_BOT = -0.38;
+
 export class GameEngine {
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
@@ -709,7 +716,7 @@ export class GameEngine {
     // Галка «Инверсия мыши по вертикали» даёт обратное поведение.
     const dy = this.settings.invertY ? e.movementY : -e.movementY;
     this.camYaw -= e.movementX * sens;
-    this.camPitch = clamp(this.camPitch + dy * sens * 0.8, -0.25, 0.65);
+    this.camPitch = clamp(this.camPitch + dy * sens * 0.8, -0.55, 0.65);
   };
 
   /** Живое применение настроек из паузы (чувствительность/звук/FOV сразу, качество — pixelRatio/bloom). */
@@ -941,17 +948,47 @@ export class GameEngine {
     p.throttle = p.alive ? th : 0;
     p.steer = p.alive ? st : 0;
     this.engineThrottle += (Math.abs(th) - this.engineThrottle) * Math.min(1, dt * 4);
-    // башня следует за камерой
+    // башня следует за камерой, но ствол не проходит сквозь стены/танки:
+    // если новая угловая позиция клиппит, а старая была свободна — упираемся и стоим.
+    // Если ствол уже в клиппинге (поджали корпусом) — разрешаем вывернуть наружу.
     const target = this.camYaw;
     const d = angDiff(target, p.turretYaw);
     const rate = p.stats.turretTurn * (p.modules.gun.broken ? 0.5 : 1);
-    p.turretYaw += clamp(d, -rate * dt, rate * dt);
+    const wantYaw = p.turretYaw + clamp(d, -rate * dt, rate * dt);
+    if (wantYaw !== p.turretYaw && p.alive) {
+      // Стена блокирует всегда. Танк блокирует, только если НЕ целимся в него в упор
+      // (иначе в клинче нельзя будет довернуть на противника).
+      const blockedAt = (yaw: number) => {
+        const c = this.barrelWouldCollide(p, p.x, p.z, p.yaw, yaw);
+        if (!c.any) return false;
+        if (c.wall) return true;
+        if (c.hitTank) {
+          const dir = Math.atan2(c.hitTank.x - p.x, c.hitTank.z - p.z);
+          if (Math.abs(angDiff(yaw, dir)) < 0.22) return false; // целимся в него — можно
+          return true;
+        }
+        return true;
+      };
+      if (blockedAt(p.turretYaw)) {
+        p.turretYaw = wantYaw; // уже в клиппинге — даём вывернуть наружу
+      } else if (!blockedAt(wantYaw)) {
+        p.turretYaw = wantYaw;
+      } else {
+        // скользящий доворот: пробуем половинный шаг, чтобы башня не залипала у края
+        const halfYaw = p.turretYaw + clamp(d, -rate * dt * 0.5, rate * dt * 0.5);
+        if (halfYaw !== p.turretYaw && !blockedAt(halfYaw)) {
+          p.turretYaw = halfYaw;
+        }
+      }
+    }
     // наведение по точке прицела
     const dx = this.aimPoint.x - p.x;
     const dz = this.aimPoint.z - p.z;
     const dist = Math.hypot(dx, dz);
-    const muzzleH = 2.2;
-    p.pitch = clamp(ballisticPitch(p.stats.shellSpeed * SHELLS[p.shell].speedMul, Math.max(dist, 5), this.aimPoint.y - muzzleH), -0.1, 0.45);
+    const muzzleH = this.getMuzzleHeight(p);
+    const wantPitch = clamp(ballisticPitch(p.stats.shellSpeed * SHELLS[p.shell].speedMul, Math.max(dist, 5), this.aimPoint.y - muzzleH), GUN_DEP_MIN, GUN_ELEV_MAX);
+    // дуло опускается до корпуса, но не сквозь него
+    p.pitch = this.clampPitchForHull(p, wantPitch);
     this.aimDistance = dist;
     const fireHeld = this.mouseDown || k.has('Space');
     if (fireHeld && p.alive) this.tryFire(p);
@@ -1009,13 +1046,41 @@ export class GameEngine {
     }
     const turnMul = trk.broken ? 0.35 : 1;
     const turnRate = t.stats.hullTurn * turnMul * (0.55 + 0.45 * Math.min(1, Math.abs(t.vel) / 3 + 0.4));
+    const oldX = t.x, oldZ = t.z, oldYaw = t.yaw;
     t.yaw += t.steer * turnRate * dt;
     const nx = t.x + Math.sin(t.yaw) * t.vel * dt;
     const nz = t.z + Math.cos(t.yaw) * t.vel * dt;
     const res = this.collideCircle(nx, nz, t.spec.radius * 0.85);
     if (res.hit) t.vel *= 0.4;
-    t.x = res.x;
-    t.z = res.z;
+    // Коллизия дула: корпус упирается, когда дуло упёрлось в стену/танк.
+    // Если ствол был свободен, а новая позиция клиппит — пробуем скольжение по осям,
+    // иначе стоим (танк упёрся дулом). Если уже в клиппинге — даём выехать назад.
+    let fx = res.x, fz = res.z;
+    if ((fx !== oldX || fz !== oldZ || t.yaw !== oldYaw) && t.alive) {
+      const wasFree = !this.barrelWouldCollide(t, oldX, oldZ, oldYaw, t.turretYaw).any;
+      if (wasFree && this.barrelWouldCollide(t, fx, fz, t.yaw, t.turretYaw).any) {
+        const slideXFree = !this.barrelWouldCollide(t, fx, oldZ, t.yaw, t.turretYaw).any;
+        const slideZFree = !this.barrelWouldCollide(t, oldX, fz, t.yaw, t.turretYaw).any;
+        if (slideXFree && !slideZFree) {
+          fz = oldZ;
+          t.vel *= 0.5;
+        } else if (!slideXFree && slideZFree) {
+          fx = oldX;
+          t.vel *= 0.5;
+        } else if (slideXFree && slideZFree) {
+          // обе оси свободны по отдельности — едем по менее заблокированной
+          if (Math.abs(fx - oldX) > Math.abs(fz - oldZ)) fz = oldZ;
+          else fx = oldX;
+          t.vel *= 0.5;
+        } else {
+          fx = oldX;
+          fz = oldZ;
+          t.vel *= 0.4;
+        }
+      }
+    }
+    t.x = fx;
+    t.z = fz;
     // визуал
     const g = t.model.group;
     g.position.set(t.x, 0, t.z);
@@ -1106,6 +1171,177 @@ export class GameEngine {
     return { x, z, hit };
   }
 
+  // ============ Коллизия ствола (пушка не проходит сквозь стены и танки) ============
+  // Реальная высота оси ствола (повторяет buildTank): раньше в наводке был хардкод 2.2,
+  // из-за чего баллистика считала угол от неверной высоты и дуло не опускалось
+  // на близких/низких целях (реальный ствол на 4.3–5.7м).
+  private getMuzzleHeight(t: Tank): number {
+    const H = t.spec.scale.height, TH = t.spec.scale.turret;
+    const trackH = H * 0.75;
+    const hullY = 0.45 + trackH * 0.4;
+    return hullY + H + H * 0.42 + TH * 0.5;
+  }
+  // Геометрия повторяет buildTank(): башня + люлька + длина ствола.
+  // Возвращает мировые координаты основания ствола (у маски) и дула (кончика).
+  private getBarrelSegment(t: Tank, hx: number, hz: number, hullYaw: number, turretYaw: number, pitchOverride?: number) {
+    const s = t.spec.scale;
+    const H = s.height, W = s.width, L = s.length, TH = s.turret, BL = s.barrel;
+    const trackH = H * 0.75;
+    const hullY = 0.45 + trackH * 0.4;
+    const turretY = hullY + H + H * 0.42;
+    const turretOffZ = t.spec.id === 'e100' ? -L * 0.05 : t.spec.id === 't34' ? L * 0.05 : L * 0.02;
+    const baseLZ = W * 0.25;
+    const baseY = turretY + TH * 0.5;
+    const len = BL + 0.2;
+    const tx = hx + Math.sin(hullYaw) * turretOffZ;
+    const tz = hz + Math.cos(hullYaw) * turretOffZ;
+    const st = Math.sin(turretYaw), ct = Math.cos(turretYaw);
+    const x0 = tx + st * baseLZ;
+    const z0 = tz + ct * baseLZ;
+    const y0 = baseY;
+    const pitch = pitchOverride ?? t.pitch ?? 0;
+    const hReach = Math.cos(pitch) * len;
+    const x1 = x0 + st * hReach;
+    const z1 = z0 + ct * hReach;
+    const y1 = y0 + Math.sin(pitch) * len;
+    return { x0, z0, y0, x1, z1, y1, len };
+  }
+
+  // Точка ствола внутри препятствия / чужого танка? br — запас на толщину ствола.
+  // Низкие укрытия (барьер 2.2м, бетон, руины 1.4м) ствол проходит сверху — это не клиппинг,
+  // т.к. ствол на высоте ~4-5.5м. Тонкие деревья/фонари и невидимый периметр игнорим.
+  private barrelPointBlocked(tSelf: Tank, x: number, y: number, z: number, br: number): { obstacle: Obstacle | null; tank: Tank | null } {
+    const obs = this.world.obstacles;
+    for (let i = 0; i < obs.length; i++) {
+      const o = obs[i];
+      if (o.kind === 'wall' || o.kind === 'tree' || o.kind === 'lamp') continue;
+      if (!o.alive && !o.rubble) continue;
+      const effH = !o.alive && o.rubble ? 1.4 : o.h;
+      if (y > effH) continue;
+      if (Math.abs(o.x - x) > o.r + br + 0.5 || Math.abs(o.z - z) > o.r + br + 0.5) continue;
+      if (o.shape === 'circle') {
+        const dx = x - o.x, dz = z - o.z;
+        const rr = o.r + br;
+        if (dx * dx + dz * dz < rr * rr) return { obstacle: o, tank: null };
+      } else {
+        if (Math.abs(x - o.x) < o.hw + br && Math.abs(z - o.z) < o.hd + br) return { obstacle: o, tank: null };
+      }
+    }
+    for (const o of this.tanks) {
+      if (o === tSelf) continue;
+      if (!o.alive && !o.wreck) continue;
+      const top = o.spec.scale.height * 2.3 + 0.5;
+      if (y > top) continue;
+      const rr = o.spec.radius * 0.9 + br;
+      const dx = x - o.x, dz = z - o.z;
+      if (dx * dx + dz * dz < rr * rr) return { obstacle: null, tank: o };
+    }
+    return { obstacle: null, tank: null };
+  }
+
+  // Есть ли клиппинг ствола при заданных позиции/угле? Проверяем точками вдоль ствола.
+  private barrelWouldCollide(t: Tank, hx: number, hz: number, hullYaw: number, turretYaw: number, br = 0.45): { wall: boolean; tank: boolean; any: boolean; hitTank: Tank | null } {
+    const seg = this.getBarrelSegment(t, hx, hz, hullYaw, turretYaw);
+    const horiz = Math.hypot(seg.x1 - seg.x0, seg.z1 - seg.z0);
+    const steps = Math.max(3, Math.ceil(horiz / 0.5));
+    for (let i = 1; i <= steps; i++) {
+      const f = i / steps;
+      const x = seg.x0 + (seg.x1 - seg.x0) * f;
+      const z = seg.z0 + (seg.z1 - seg.z0) * f;
+      const y = seg.y0 + (seg.y1 - seg.y0) * f;
+      const hit = this.barrelPointBlocked(t, x, y, z, br);
+      if (hit.obstacle) return { wall: true, tank: false, any: true, hitTank: null };
+      if (hit.tank) return { wall: false, tank: true, any: true, hitTank: hit.tank };
+    }
+    return { wall: false, tank: false, any: false, hitTank: null };
+  }
+
+  // Свободная точка вылета снаряда (коллизия на дуле): идём от маски к дулу,
+  // возвращаем последнюю свободную точку перед первым препятствием/танком.
+  // Не даёт выстрелить СКВОЗЬ стену, поставив дуло за неё, — снаряд упрётся в стену.
+  private getBarrelFreeMuzzle(t: Tank, hx: number, hz: number, hullYaw: number, turretYaw: number, br = 0.3) {
+    const seg = this.getBarrelSegment(t, hx, hz, hullYaw, turretYaw);
+    const horiz = Math.hypot(seg.x1 - seg.x0, seg.z1 - seg.z0);
+    const steps = Math.max(4, Math.ceil(horiz / 0.4));
+    let fx = seg.x1, fy = seg.y1, fz = seg.z1;
+    let blocked = false;
+    for (let i = 1; i <= steps; i++) {
+      const f = i / steps;
+      const x = seg.x0 + (seg.x1 - seg.x0) * f;
+      const z = seg.z0 + (seg.z1 - seg.z0) * f;
+      const y = seg.y0 + (seg.y1 - seg.y0) * f;
+      const hit = this.barrelPointBlocked(t, x, y, z, br);
+      if (hit.obstacle || hit.tank) {
+        blocked = true;
+        // откат на шаг назад — вылет чуть перед препятствием
+        const pf = Math.max(0, (i - 1) / steps);
+        fx = seg.x0 + (seg.x1 - seg.x0) * pf;
+        fy = seg.y0 + (seg.y1 - seg.y0) * pf;
+        fz = seg.z0 + (seg.z1 - seg.z0) * pf;
+        // если упёрлись сразу у маски — стреляем от маски, снаряд сразу попадёт в стену
+        break;
+      }
+      fx = x; fy = y; fz = z;
+    }
+    return { x: fx, y: fy, z: fz, blocked };
+  }
+
+  // Касается ли ствол при данном pitch своего же корпуса?
+  // Корпус — два бокса как в buildTank(): нижний (весь L, верх hullY+H*1.05 с гласисом)
+  // и верхний надстройка (короче L*0.7 со сдвигом -L*0.05, верх hullY+H*1.425).
+  // Одно tall-боксовое приближение резало склонение уже на -0.1 вперёд, поэтому два бокса.
+  // Первые ~0.9м пропускаем — это маска/люлька внутри башни.
+  private barrelHitsSelf(t: Tank, hx: number, hz: number, hullYaw: number, turretYaw: number, pitch: number): boolean {
+    const s = t.spec.scale;
+    const H = s.height, W = s.width, L = s.length;
+    const trackH = H * 0.75;
+    const hullY = 0.45 + trackH * 0.4;
+    const lowerTop = hullY + H * 1.05;
+    const upperTop = hullY + H * 1.425;
+    const upperCz = -L * 0.05;
+    const seg = this.getBarrelSegment(t, hx, hz, hullYaw, turretYaw, pitch);
+    const br = 0.15;
+    const hw = W / 2 + br;
+    const hl = L / 2 + br;
+    const uw = (W * 0.98) / 2 + br;
+    const uh = (L * 0.7) / 2 + br;
+    const cy = Math.cos(hullYaw), sy = Math.sin(hullYaw);
+    const total = Math.hypot(seg.x1 - seg.x0, seg.z1 - seg.z0);
+    const steps = Math.max(4, Math.ceil(total / 0.4));
+    for (let i = 1; i <= steps; i++) {
+      const f = i / steps;
+      // пропуск зоны маски
+      if (f * total < 0.9) continue;
+      const x = seg.x0 + (seg.x1 - seg.x0) * f;
+      const z = seg.z0 + (seg.z1 - seg.z0) * f;
+      const y = seg.y0 + (seg.y1 - seg.y0) * f;
+      if (y < 0.25) return true; // дуло в земле — тоже упор
+      if (y > upperTop + br) continue; // выше всего — свободно
+      const dx = x - hx, dz = z - hz;
+      const lx = dx * cy - dz * sy;
+      const lz = dx * sy + dz * cy;
+      if (y < upperTop + br && Math.abs(lx) < uw && Math.abs(lz - upperCz) < uh) return true;
+      if (y < lowerTop + br && Math.abs(lx) < hw && Math.abs(lz) < hl) return true;
+    }
+    return false;
+  }
+
+  // Кламп склонения: дуло опускается ровно до корпуса (и не ниже), но не выше желания.
+  // Подъём вверх корпусом не ограничивается.
+  private clampPitchForHull(t: Tank, desired: number): number {
+    if (desired >= 0) return desired;
+    if (!this.barrelHitsSelf(t, t.x, t.z, t.yaw, t.turretYaw, desired)) return desired;
+    let lo = desired, hi = 0;
+    // бинпоиск максимального склонения без клиппинга в свой корпус (12 итераций хватит)
+    for (let i = 0; i < 12; i++) {
+      const mid = (lo + hi) / 2;
+      if (this.barrelHitsSelf(t, t.x, t.z, t.yaw, t.turretYaw, mid)) lo = mid;
+      else hi = mid;
+      if (Math.abs(hi - lo) < 0.005) break;
+    }
+    return hi;
+  }
+
   private resolveTankCollisions() {
     const list = this.tanks.filter((t) => t.alive || t.wreck);
     for (let i = 0; i < list.length; i++)
@@ -1152,9 +1388,11 @@ export class GameEngine {
       return false;
     }
     const shell = SHELLS[t.shell];
-    t.model.group.updateMatrixWorld(true);
-    const mp = new THREE.Vector3();
-    t.model.muzzle.getWorldPosition(mp);
+    // Коллизия на дуле: снаряд вылетает из последней свободной точки ствола.
+    // Если дуло за стеной (ствол просунули сквозь дом) — вылет перед стеной и удар в стену,
+    // а не выстрел сквозь неё. Поэтому читерить просовыванием ствола нельзя.
+    const free = this.getBarrelFreeMuzzle(t, t.x, t.z, t.yaw, t.turretYaw);
+    const mp = new THREE.Vector3(free.x, free.y, free.z);
     const spread = (t.modules.gun.hp < 0.5 ? 0.02 : 0.004) * (t.isPlayer ? 1 : 1.2);
     const yaw = t.turretYaw + (Math.random() - 0.5) * spread;
     const pitch = t.pitch + (Math.random() - 0.5) * spread;
@@ -1905,17 +2143,37 @@ export class GameEngine {
       const desiredYaw = Math.atan2(ax - t.x, az - t.z);
       const d = angDiff(desiredYaw, t.turretYaw);
       const rate = t.stats.turretTurn * (t.modules.gun.broken ? 0.5 : 1);
-      t.turretYaw += clamp(d, -rate * dt, rate * dt);
+      const wantBotYaw = t.turretYaw + clamp(d, -rate * dt, rate * dt);
+      // боты тоже не просовывают ствол сквозь стены; сквозь танки — только если не целятся в него
+      if (wantBotYaw !== t.turretYaw) {
+        const blockedBotAt = (yaw: number) => {
+          const c = this.barrelWouldCollide(t, t.x, t.z, t.yaw, yaw);
+          if (!c.any) return false;
+          if (c.wall) return true;
+          if (c.hitTank && c.hitTank !== target) return true; // чужой танк на пути доворота
+          return false; // целимся в упор в свою цель — можно
+        };
+        if (blockedBotAt(t.turretYaw)) {
+          t.turretYaw = wantBotYaw; // уже в клиппинге — даём вывернуть
+        } else if (!blockedBotAt(wantBotYaw)) {
+          t.turretYaw = wantBotYaw;
+        }
+      }
       const hd = Math.hypot(ax - t.x, az - t.z);
-      t.pitch = clamp(ballisticPitch(v, hd, 1.4 - 2.2), -0.1, 0.4);
+      const wantBotPitch = clamp(ballisticPitch(v, hd, 1.4 - this.getMuzzleHeight(t)), GUN_DEP_MIN_BOT, 0.4);
+      t.pitch = this.clampPitchForHull(t, wantBotPitch);
       if (Math.abs(d) < 0.035 && distT < 120 && los && t.reload <= 0 && !t.modules.gun.broken) {
         if (Math.random() < 0.6 + ai.skill * 0.4) this.tryFire(t);
         else t.reload = 0.3;
       }
     } else {
-      // башня по ходу движения
+      // башня по ходу движения (тоже с упором ствола)
       const d = angDiff(t.yaw, t.turretYaw);
-      t.turretYaw += clamp(d, -t.stats.turretTurn * dt, t.stats.turretTurn * dt);
+      const wantIdleYaw = t.turretYaw + clamp(d, -t.stats.turretTurn * dt, t.stats.turretTurn * dt);
+      if (wantIdleYaw !== t.turretYaw) {
+        if (this.barrelWouldCollide(t, t.x, t.z, t.yaw, t.turretYaw).any) t.turretYaw = wantIdleYaw;
+        else if (!this.barrelWouldCollide(t, t.x, t.z, t.yaw, wantIdleYaw).any) t.turretYaw = wantIdleYaw;
+      }
       t.pitch = 0;
     }
   }
