@@ -136,6 +136,10 @@ export interface HudSnapshot {
   };
   canFire: boolean;
   aimDistance: number;
+  /** Танк под прицелом: для оконтовки прицела в HUD */
+  aimEnemy: boolean;
+  aimAlly: boolean;
+  aimName: string | null;
   inPoint: string | null;
   invuln: number;
   pointerLocked: boolean;
@@ -259,6 +263,8 @@ export class GameEngine {
   private aimTimer = 0;
   private aimTargets: THREE.Object3D[] = [];
   private aimTargetsDirty = true;
+  /** Танк под прицелом (первое пересечение луча из центра экрана). Для оконтовки. */
+  private aimedTank: Tank | null = null;
   private audioTimer = 0;
   private captureTickTimer = 0;
   private tracerTick = 0;
@@ -996,6 +1002,7 @@ export class GameEngine {
     this.debris.update(dt);
     this.weather?.update(dt, this.player.x, this.player.z, this.time);
     this.updateMarkers();
+    this.updateTargetHighlight();
     this.damageFlash = Math.max(0, this.damageFlash - dt * 1.6);
     this.hitMarker = Math.max(0, this.hitMarker - dt * 3);
     this.checkEnd(dt);
@@ -1775,6 +1782,7 @@ export class GameEngine {
   }
 
   private killTank(t: Tank, attacker: Tank) {
+    if (this.aimedTank === t) this.setAimedTank(null);
     t.alive = false;
     t.vel = 0;
     t.throttle = 0;
@@ -1974,6 +1982,73 @@ export class GameEngine {
   }
   private isAlly(a: Tank, b: Tank) {
     return a !== b && this.cfg.mode === 'capture' && a.team === b.team;
+  }
+
+  // ================= Оконтовка цели (emissive подсветка) =================
+  // Дешёвая замена OutlinePass: не создаёт RT и draw calls, работает на lowEnd.
+  // bodyMats — MeshStandardMaterial, emissive по умолчанию чёрный, так что
+  // сброс в 0x000000 возвращает исходный вид без хранения состояния.
+  private setAimedTank(t: Tank | null) {
+    if (this.aimedTank === t) return;
+    // снять старую подсветку
+    const prev = this.aimedTank;
+    if (prev) {
+      for (const m of prev.model.bodyMats) {
+        try {
+          m.emissive.setHex(0x000000);
+          m.emissiveIntensity = 1;
+        } catch { /* */ }
+      }
+    }
+    if (!t || !t.alive || t.wreck) {
+      this.aimedTank = null;
+      return;
+    }
+    this.aimedTank = t;
+    // враг — красный, союзник — синий. Интенсивность пульсирует в updateTargetHighlight().
+    const enemy = this.isEnemy(this.player, t);
+    const col = enemy ? 0xff2a18 : 0x2a7fff;
+    for (const m of t.model.bodyMats) {
+      try {
+        m.emissive.setHex(col);
+        m.emissiveIntensity = 0.35;
+      } catch { /* */ }
+    }
+  }
+
+  /** Пульсация подсветки + автоснятие если цель умерла/стала остовом. */
+  private updateTargetHighlight() {
+    const t = this.aimedTank;
+    if (!t) return;
+    if (!t.alive || t.wreck || t.model.bodyMats.length === 0) {
+      this.setAimedTank(null);
+      return;
+    }
+    const k = 0.32 + 0.14 * Math.sin(this.time * 7);
+    for (const m of t.model.bodyMats) {
+      try { m.emissiveIntensity = k; } catch { /* */ }
+    }
+  }
+
+  private tankFromHitObject(o: THREE.Object3D | null): Tank | null {
+    if (!o) return null;
+    for (const t of this.tanks) {
+      if (t === this.player) continue;
+      if (o === t.hitbox) return t;
+    }
+    // запасной путь: хитбокс могли вернуть через parent (имя 'hitbox')
+    let cur: THREE.Object3D | null = o;
+    while (cur) {
+      if ((cur as THREE.Mesh).name === 'hitbox') {
+        for (const t of this.tanks) {
+          if (t !== this.player && t.hitbox === cur) return t;
+          if (t !== this.player && t.model.group === cur.parent) return t;
+        }
+        break;
+      }
+      cur = cur.parent;
+    }
+    return null;
   }
 
   private hasLOS(ax: number, az: number, bx: number, bz: number) {
@@ -2604,11 +2679,16 @@ export class GameEngine {
         this.raycaster.far = 400;
         const hs = this.raycaster.intersectObjects(this.aimTargets, true);
         let pt: THREE.Vector3 | null = null;
+        let aimed: Tank | null = null;
         for (const h of hs) {
           if (h.distance < 6) continue;
           pt = h.point;
+          // первое препятствие решает: танк за стеной не подсвечиваем
+          const cand = this.tankFromHitObject(h.object);
+          if (cand && cand.alive && !cand.wreck) aimed = cand;
           break;
         }
+        this.setAimedTank(aimed);
         if (!pt) {
           const dir = this.raycaster.ray.direction;
           const org = this.raycaster.ray.origin;
@@ -2623,6 +2703,8 @@ export class GameEngine {
         }
         this.aimPoint.copy(pt);
       }
+    } else if (this.aimedTank) {
+      this.setAimedTank(null);
     }
   }
 
@@ -2716,7 +2798,11 @@ export class GameEngine {
         destroyed: this.destroyedCache,
       },
       canFire: p.reload <= 0 && !p.modules.gun.broken && p.ammo[p.shell] > 0,
-      aimDistance: this.aimDistance, inPoint, invuln: p.invuln, pointerLocked: this.pointerLocked, hitMarker: this.hitMarker, kills: this.stats.kills,
+      aimDistance: this.aimDistance,
+      aimEnemy: !!this.aimedTank && this.aimedTank.alive && this.isEnemy(p, this.aimedTank),
+      aimAlly: !!this.aimedTank && this.aimedTank.alive && this.isAlly(p, this.aimedTank),
+      aimName: this.aimedTank && this.aimedTank.alive ? this.aimedTank.name : null,
+      inPoint, invuln: p.invuln, pointerLocked: this.pointerLocked, hitMarker: this.hitMarker, kills: this.stats.kills,
     };
   }
 
@@ -2726,6 +2812,7 @@ export class GameEngine {
 
   // ================= Очистка =================
   private disposeTank(t: Tank) {
+    if (this.aimedTank === t) this.aimedTank = null;
     try {
       this.scene.remove(t.model.group);
     } catch {

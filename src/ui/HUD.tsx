@@ -207,7 +207,8 @@ export default memo(function HUD({ s, staticMap }: Props) {
   }, [s, staticMap]);
 
   const reloadPct = Math.min(1, Math.max(0, s.reload));
-  const crossColor = !s.alive ? '#666' : s.modules.gunBroken ? '#ff4d4d' : s.canFire ? '#b9ff3d' : '#ffb424';
+  // оконтовка цели: враг под прицелом — красный прицел, союзник — синий
+  const crossColor = !s.alive ? '#666' : s.aimEnemy ? '#ff3b30' : s.aimAlly ? '#5aa9ff' : s.modules.gunBroken ? '#ff4d4d' : s.canFire ? '#b9ff3d' : '#ffb424';
   const R = 26;
   const circ = 2 * Math.PI * R;
   const hpPct = s.hp / s.maxHp;
@@ -224,11 +225,17 @@ export default memo(function HUD({ s, staticMap }: Props) {
         : 'rgba(255,90,90,0.7)';
   const aimText = s.modules.gunBroken
     ? 'ОРУДИЕ ПОВРЕЖДЕНО'
-    : s.canFire
-      ? `${Math.round(s.aimDistance)} м`
-      : s.ammo[s.shell] <= 0
-        ? 'НЕТ СНАРЯДОВ'
-        : `ПЕРЕЗАРЯДКА ${s.reloadLeft.toFixed(1)} с`;
+    : s.aimEnemy && s.aimName
+      ? `ЦЕЛЬ: ${s.aimName} • ${Math.round(s.aimDistance)} м`
+      : s.aimEnemy
+        ? `ЦЕЛЬ • ${Math.round(s.aimDistance)} м`
+        : s.aimAlly
+          ? `СВОЙ • НЕ СТРЕЛЯЙ`
+          : s.canFire
+            ? `${Math.round(s.aimDistance)} м`
+            : s.ammo[s.shell] <= 0
+              ? 'НЕТ СНАРЯДОВ'
+              : `ПЕРЕЗАРЯДКА ${s.reloadLeft.toFixed(1)} с`;
 
   return (
     <div className="absolute inset-0 pointer-events-none select-none font-display">
@@ -249,8 +256,8 @@ export default memo(function HUD({ s, staticMap }: Props) {
         <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
           <svg width="120" height="120" viewBox="-60 -60 120 120" aria-hidden>
             <circle r={R} fill="none" stroke="rgba(0,0,0,0.5)" strokeWidth="4" />
-            <circle r={R} fill="none" stroke={crossColor} strokeWidth="2" strokeDasharray={`${circ * reloadPct} ${circ}`} transform="rotate(-90)" opacity="0.95" />
-            <circle r={R + 6} fill="none" stroke={crossColor} strokeWidth="1" opacity="0.3" strokeDasharray="4 8" />
+            <circle r={R} fill="none" stroke={crossColor} strokeWidth={s.aimEnemy ? 3.5 : 2} strokeDasharray={`${circ * reloadPct} ${circ}`} transform="rotate(-90)" opacity="0.95" />
+            <circle r={R + 6} fill="none" stroke={crossColor} strokeWidth={s.aimEnemy ? 2 : 1} opacity={s.aimEnemy ? 0.9 : 0.3} strokeDasharray="4 8" />
             {[0, 90, 180, 270].map((a) => (
               <line key={a} x1="0" y1={-(R + 10)} x2="0" y2={-(R + 18)} stroke={crossColor} strokeWidth="2" transform={`rotate(${a})`} />
             ))}
