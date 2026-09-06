@@ -32,6 +32,7 @@ function pointStatus(p: { contested: boolean; capturing: number; owner: number }
 export default memo(function HUD({ s, staticMap }: Props) {
   const mapRef = useRef<HTMLCanvasElement>(null);
   const staticRef = useRef<HTMLCanvasElement | null>(null);
+  const lastMapDraw = useRef(0);
   const [mapIdx, setMapIdx] = useState(1);
   const mapSize = MAP_STEPS[mapIdx];
   const zoomIn = () => setMapIdx((v) => Math.min(MAP_STEPS.length - 1, v + 1));
@@ -54,16 +55,19 @@ export default memo(function HUD({ s, staticMap }: Props) {
   }, []);
 
   // ---- Статик миникарты: фон + сетка + препятствия — только при смене карты ----
+  // Оффскрин в DPR-разрешении, иначе статика мыльная на ретине при drawImage в DPR-канвас.
   useEffect(() => {
     if (!staticMap) return;
     let off = staticRef.current;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
     if (!off) {
       off = document.createElement('canvas');
-      off.width = MAP_SIZE;
-      off.height = MAP_SIZE;
       staticRef.current = off;
     }
+    off.width = MAP_SIZE * dpr;
+    off.height = MAP_SIZE * dpr;
     const ctx = off.getContext('2d')!;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const W = MAP_SIZE;
     const half = staticMap.half;
     ctx.clearRect(0, 0, W, W);
@@ -85,28 +89,35 @@ export default memo(function HUD({ s, staticMap }: Props) {
     }
   }, [staticMap]);
 
-  // ---- DPR-шарпнесс миникарты (один раз) ----
+  // ---- DPR-шарпнесс миникарты: бэкстор под текущий размер + DPR (зум/перетаскивание между мониторами) ----
   useEffect(() => {
     const c = mapRef.current;
     if (!c) return;
     try {
       const dpr = Math.min(2, window.devicePixelRatio || 1);
-      if (dpr > 1 && c.width === MAP_SIZE) {
-        c.width = MAP_SIZE * dpr;
-        c.height = MAP_SIZE * dpr;
+      const need = Math.round(mapSize * dpr);
+      if (c.width !== need || c.height !== need) {
+        c.width = need;
+        c.height = need;
       }
     } catch {
       /* */
     }
-  }, []);
+  }, [mapSize]);
 
-  // ---- Миникарта: динамика каждый тик поверх статики ----
+  // ---- Миникарта: динамика поверх статики ----
+  // Движок шлёт HUD ~8Гц; канвас 200px перерисовывать каждый тик избыточно — троттлим до ~5Гц.
+  // Пропущенный тик догонит следующий: позиции всё равно дискретны на 8Гц данных.
   useEffect(() => {
+    const now = performance.now();
+    if (now - lastMapDraw.current < 200) return;
+    lastMapDraw.current = now;
     const c = mapRef.current;
     if (!c || !staticMap) return;
     const ctx = c.getContext('2d')!;
-    const dpr = c.width > MAP_SIZE ? c.width / MAP_SIZE : 1;
+    const dpr = c.width / mapSize;
     const W = MAP_SIZE;
+    const k = mapSize / MAP_SIZE; // масштаб отображения: линия башни и шрифт растут с зумом
     const half = staticMap.half;
     const sx = (x: number) => ((x / half + 1) / 2) * W;
     const sy = (z: number) => (1 - (z / half + 1) / 2) * W;
@@ -143,7 +154,8 @@ export default memo(function HUD({ s, staticMap }: Props) {
       ctx.strokeStyle = col;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.arc(sx(p.x), sy(p.z), (11 / (half * 2)) * W, 0, Math.PI * 2);
+      // минимум 4px: на больших картах радиус 11м схлопывался в точку
+      ctx.arc(sx(p.x), sy(p.z), Math.max(4, (11 / (half * 2)) * W), 0, Math.PI * 2);
       ctx.stroke();
       ctx.fillStyle = col;
       ctx.font = 'bold 11px monospace';
@@ -171,10 +183,11 @@ export default memo(function HUD({ s, staticMap }: Props) {
     // игрок
     const p = s.minimap.player;
     const px = sx(p.x), py = sy(p.z);
+    const barrelLen = 16 * k;
     ctx.strokeStyle = 'rgba(185,255,61,0.5)';
     ctx.beginPath();
     ctx.moveTo(px, py);
-    ctx.lineTo(px + Math.sin(p.turretYaw) * 16, py - Math.cos(p.turretYaw) * 16);
+    ctx.lineTo(px + Math.sin(p.turretYaw) * barrelLen, py - Math.cos(p.turretYaw) * barrelLen);
     ctx.stroke();
     ctx.fillStyle = '#b9ff3d';
     ctx.save();
@@ -409,7 +422,7 @@ export default memo(function HUD({ s, staticMap }: Props) {
           <span className="text-lime tabular-nums">{s.minimap.player.x.toFixed(0)} · {s.minimap.player.z.toFixed(0)}</span>
         </div>
         <div className="hud-map-frame" style={{ borderColor: mapBorder }} title="Тактическая карта. Масштаб: клавиши − / + или M">
-          <canvas ref={mapRef} width={MAP_SIZE} height={MAP_SIZE} style={{ width: mapSize, height: mapSize }} className="block" />
+          <canvas ref={mapRef} width={MAP_SIZE} height={MAP_SIZE} style={{ width: mapSize, height: mapSize }} className="block" role="img" aria-label="Тактическая миникарта боя" />
           <div className="hud-map-btns pointer-events-auto">
             <button
               type="button"

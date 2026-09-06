@@ -60,3 +60,10 @@ export const QUALITY_NAMES: Record<Quality, string> = {
   low: 'Низкое',
   high: 'Высокое',
 };
+
+/** Дублирует выбор качества в body[data-quality] — CSS гасит backdrop-blur на low. */
+export function syncBodyQualityAttr(quality: Quality) {
+  try {
+    if (typeof document !== 'undefined' && document.body) document.body.dataset.quality = quality;
+  } catch { /* */ }
+}

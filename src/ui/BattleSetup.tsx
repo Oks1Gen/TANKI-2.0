@@ -1,5 +1,6 @@
-import { BattleConfig, BIOMES, BIOME_NAMES, TIMES, TIME_NAMES, WEATHERS, WEATHER_NAMES, MODE_NAMES, GameMode, Duration, DURATION_NAMES, DURATION_SECONDS, TANKS, TankId, BOT_DIFFICULTIES, BOT_DIFFICULTY_NAMES, BOT_DIFFICULTY_SPECS, BotDifficulty, TimeOfDay } from '../game/config';
-import { getDarkFactor, TIME_PRESETS } from '../game/world';
+import { BattleConfig, BIOMES, BIOME_NAMES, TIMES, TIME_NAMES, WEATHERS, WEATHER_NAMES, MODE_NAMES, GameMode, Duration, DURATION_NAMES, DURATION_SECONDS, TANKS, TankId, BOT_DIFFICULTIES, BOT_DIFFICULTY_NAMES, BOT_DIFFICULTY_SPECS, BotDifficulty, TimeOfDay, getTeamCounts } from '../game/config';
+import { REWARD_TEXT } from '../game/economy';
+import { getDarkFactor, TIME_PRESETS, LIGHTS_DARK_THRESHOLD } from '../game/world';
 import { Panel, Btn, Chip, Corner, fmtTime } from './common';
 import { BiomeIcon, WeatherIcon, TimeIcon } from './icons';
 import SettingsPanel from './SettingsPanel';
@@ -17,15 +18,11 @@ interface Props {
 const skyHex = (t: TimeOfDay) => '#' + TIME_PRESETS[t].sky.toString(16).padStart(6, '0');
 
 export default function BattleSetup({ setup, setSetup, tank, onBack, onStart }: Props) {
-  // Состав команд — та же математика, что в движке (engine: bots → teams):
-  // захват: красных = ceil((боты+1)/2), синие боты — остаток, игрок — за синих;
-  // бой насмерть: все боты — противники, каждый сам за себя.
-  const total = setup.bots + 1;
-  const red = setup.mode === 'capture' ? Math.ceil(total / 2) : setup.bots;
-  const blue = setup.bots - red;
+  // Состав команд — из общего хелпера с движком (раньше формула была скопирована в двух местах).
+  const { red, blue } = getTeamCounts(setup.bots, setup.mode);
   const timeIdx = Math.max(0, TIMES.indexOf(setup.time));
   const dark = getDarkFactor(setup.time, setup.weather);
-  const lightsOn = dark > 0.35; // тот же порог, что включает фары в бою
+  const lightsOn = dark > LIGHTS_DARK_THRESHOLD;
 
   const stepTime = (d: number) => {
     const next = Math.max(0, Math.min(TIMES.length - 1, timeIdx + d));
@@ -69,19 +66,23 @@ export default function BattleSetup({ setup, setSetup, tank, onBack, onStart }: 
                 <span className="caption w-28 shrink-0">Противники</span>
                 <input
                   type="range"
-                  min={1}
+                  min={0}
                   max={12}
                   value={setup.bots}
                   onChange={(e) => setSetup({ ...setup, bots: +e.target.value })}
                   className="flex-1"
                   aria-label="Количество ботов"
-                  aria-valuetext={`${setup.bots} ботов`}
+                  aria-valuetext={setup.bots === 0 ? 'тренировка без ботов' : `${setup.bots} ботов`}
                 />
                 <span className="mono text-lime font-bold w-8 text-right tabular-nums" aria-hidden>{setup.bots}</span>
               </div>
-              <div className="mt-2.5">
-                <TeamDots red={red} blue={blue} mode={setup.mode} />
-              </div>
+              {setup.bots === 0 ? (
+                <div className="mono text-[11px] text-lime mt-2 tracking-wider">ТРЕНИРОВКА — свободная практика без противников и наград за фраги</div>
+              ) : (
+                <div className="mt-2.5">
+                  <TeamDots red={red} blue={blue} mode={setup.mode} />
+                </div>
+              )}
             </div>
             <div className="mt-4">
               <div className="caption mb-2">Сложность ботов</div>
@@ -212,7 +213,7 @@ export default function BattleSetup({ setup, setSetup, tank, onBack, onStart }: 
             <div className="mono text-[12px] space-y-2">
               <Row k="Машина" v={`${TANKS[tank].name} · ${TANKS[tank].role}`} />
               <Row k="Режим" v={MODE_NAMES[setup.mode]} />
-              <Row k="Противники" v={setup.mode === 'capture' ? `${red} красных` : `${setup.bots} ботов`} />
+              <Row k="Противники" v={setup.bots === 0 ? 'Тренировка (нет)' : setup.mode === 'capture' ? `${red} красных` : `${setup.bots} ботов`} />
               <Row k="Сложность" v={BOT_DIFFICULTY_NAMES[setup.botDifficulty ?? 'veteran']} />
               {setup.mode === 'capture' && <Row k="Союзники" v={`${blue} синих + вы`} />}
               {setup.mode === 'capture' && <Row k="Таймер" v={fmtTime(DURATION_SECONDS[setup.duration])} />}
@@ -221,15 +222,15 @@ export default function BattleSetup({ setup, setSetup, tank, onBack, onStart }: 
               <Row k="Погода" v={WEATHER_NAMES[setup.weather]} />
             </div>
             <div className="divider my-3" />
-            {/* Награда — тарифы из движка боя, итог зависит от результата */}
+            {/* Награда — тарифы из economy.ts, тот же источник, что считает движок */}
             <div className="caption mb-2">Награда</div>
             <div className="mono text-[12px] space-y-2">
-              <Row k="Фраг" v="130 XP · 6 ◆" />
-              <Row k="Урон ×100" v="≈9 XP" />
-              {setup.mode === 'capture' && <Row k="Захват" v="90 XP · 8 ◆" />}
-              {setup.mode === 'deathmatch' && <Row k="Выживание" v="150 XP · 10 ◆" />}
-              <Row k="Победа" v="420 XP · 45 ◆" />
-              <Row k="Ничья / Поражение" v="200·20 / 90·8" />
+              <Row k="Фраг" v={REWARD_TEXT.kill} />
+              <Row k="Урон ×100" v={REWARD_TEXT.damage100} />
+              {setup.mode === 'capture' && <Row k="Захват" v={REWARD_TEXT.capture} />}
+              {setup.mode === 'deathmatch' && <Row k="Выживание" v={REWARD_TEXT.survival} />}
+              <Row k="Победа" v={REWARD_TEXT.win} />
+              <Row k="Ничья / Поражение" v={REWARD_TEXT.drawLose} />
             </div>
             <div className="mt-3 text-[12px] text-olive-300 leading-relaxed border-t border-olive-500/30 pt-3">
               Выход в бой — бесплатно. Итоговая награда зависит от результата: фраги, урон{setup.mode === 'capture' ? ', захваты' : ''} и исход боя.

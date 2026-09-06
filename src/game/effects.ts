@@ -134,7 +134,22 @@ export class ParticleSystem {
     this.geo.attributes.aAlpha.needsUpdate = true;
   }
 
+  updateScale(viewportHeightPx: number, fovDeg: number) {
+    try {
+      const mat = this.points.material as THREE.ShaderMaterial;
+      const u = mat.uniforms?.uScale as { value: number } | undefined;
+      if (!u) return;
+      const h = Number.isFinite(viewportHeightPx) && viewportHeightPx > 0 ? viewportHeightPx : 600;
+      const fov = Number.isFinite(fovDeg) ? Math.max(30, Math.min(90, fovDeg)) : 62;
+      // gl_PointSize = size * uScale / -mv.z → uScale ~ h / (2*tan(fov/2))
+      u.value = h / (2 * Math.tan((fov * Math.PI) / 360));
+    } catch { /* */ }
+  }
+
   dispose() {
+    try {
+      this.points.parent?.remove(this.points);
+    } catch { /* */ }
     this.geo.dispose();
     (this.points.material as THREE.Material).dispose();
   }
@@ -243,6 +258,7 @@ export class TrackMarks {
     this.mesh = new THREE.InstancedMesh(geo, mat, count);
     this.mesh.frustumCulled = false;
     this.mesh.receiveShadow = false;
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     for (let i = 0; i < count; i++) {
       this.dummy.position.set(0, -10, 0);
       this.dummy.updateMatrix();
@@ -273,10 +289,12 @@ export class WeatherSystem {
   private kind: Weather;
   private box = { w: 70, h: 40 };
   private speeds: Float32Array | null = null;
-  constructor(private scene: THREE.Scene, weather: Weather) {
+  constructor(private scene: THREE.Scene, weather: Weather, lowEnd = false) {
     this.kind = weather;
+    // На слабом железе — вдвое меньше отрезков/хлопьев: тот же эффект, в 2 раза дешевле CPU+fill.
+    const q = lowEnd ? 0.5 : 1;
     if (weather === 'rain' || weather === 'storm') {
-      this.n = weather === 'storm' ? 900 : 600;
+      this.n = Math.round((weather === 'storm' ? 900 : 600) * q);
       const pos = new Float32Array(this.n * 6);
       const geo = new THREE.BufferGeometry();
       for (let i = 0; i < this.n; i++) {
@@ -290,7 +308,7 @@ export class WeatherSystem {
       this.obj = new THREE.LineSegments(geo, mat);
       this.positions = pos;
     } else if (weather === 'snow') {
-      this.n = 700;
+      this.n = Math.round(700 * q);
       const pos = new Float32Array(this.n * 3);
       this.speeds = new Float32Array(this.n);
       for (let i = 0; i < this.n; i++) {

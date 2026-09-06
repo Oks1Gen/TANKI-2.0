@@ -61,4 +61,37 @@ export async function run(canvas: HTMLCanvasElement, getRaf: () => ((t: number) 
     console.log(cfg.mode, cfg.biome, '->', ended.outcome, 'kills', ended.kills, 'xp', ended.xp, 'shots', ended.shotsFired, 'hits', ended.shotsHit, 'paused', paused, 'destroyed obstacles', e.world.obstacles.filter((o: Any) => !o.alive).length, 'score', JSON.stringify(ended.score));
     eng.dispose();
   }
+
+  // Тренировка (0 ботов): свободная практика — бой НЕ должен сам завершаться, исключений быть не должно
+  {
+    const cfg: BattleConfig = { mode: 'deathmatch', biome: 'forest', time: 'day', weather: 'clear', duration: 'medium', bots: 0, tank: 't34', camo: 'base', upgrades: { gun: 0, engine: 0, armor: 0, sight: 0, ammo: 0, suspension: 0 }, goldUpgrade: false };
+    let ended: Any = null;
+    let hud: Any = null;
+    const eng = new GameEngine(canvas, cfg, {
+      onHud: (s) => (hud = s),
+      onEnd: (r) => (ended = r),
+      onPause: () => {},
+      onReady: () => {},
+    });
+    const e = eng as Any;
+    let t = 0;
+    const frame = (dt: number) => {
+      t += dt * 1000;
+      const cb = getRaf();
+      if (cb) cb(t);
+    };
+    e.last = 0;
+    frame(0.016);
+    e.keys.add('KeyW');
+    e.mouseDown = true;
+    for (let i = 0; i < 600; i++) {
+      if (i % 120 === 0) e.camYaw += 1.2;
+      frame(0.016);
+    }
+    if (!hud) throw new Error('no hud in training');
+    if (ended) throw new Error('training battle should not auto-end');
+    if (e.tanks.length !== 1) throw new Error('training should have only player, got ' + e.tanks.length);
+    console.log('deathmatch training(0 bots) -> running, no auto-end, hud ok');
+    eng.dispose();
+  }
 }

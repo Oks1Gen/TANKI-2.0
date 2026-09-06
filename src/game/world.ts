@@ -201,6 +201,8 @@ export const TIME_PRESETS: Record<TimeOfDay, TimePreset> = {
 };
 
 // 0 = день, 1 = глубокая ночь. Учитывает время суток + погоду (туман/гроза тоже затемняют).
+/** Порог затемнения, выше которого включаются фары/фонари. Единый для движка и UI сетапа. */
+export const LIGHTS_DARK_THRESHOLD = 0.35;
 export function getDarkFactor(time: TimeOfDay, weather: Weather): number {
   const base: Record<TimeOfDay, number> = {
     night: 1.0,
@@ -280,7 +282,7 @@ export function setupEnvironment(scene: THREE.Scene, cfg: BattleConfig): Environ
   const ambient = new THREE.AmbientLight(tp.amb, 1.0);
   scene.add(ambient);
 
-  const isNight = tp.night || darkFactor > 0.35;
+  const isNight = tp.night || darkFactor > LIGHTS_DARK_THRESHOLD;
   return { sun, hemi, ambient, fogColor: fog, isNight, darkFactor, visibility, skyColor: sky, sunDir: sun.position.clone().normalize() };
 }
 
@@ -826,7 +828,7 @@ export function buildWorld(scene: THREE.Scene, cfg: BattleConfig, seed: number):
       // настоящий свет — только при темноте, без теней, с ограниченной дальностью
       const light = new THREE.PointLight(0xffc37a, env.darkFactor * 60, 32, 1.8);
       light.position.set(1.3, 6.0, 0);
-      light.visible = env.darkFactor > 0.35;
+      light.visible = env.darkFactor > LIGHTS_DARK_THRESHOLD;
       g.add(light);
       // h=1.5: тонкий столб не должен считаться укрытием для ИИ (findCover требует h>=2.5)
       addCircle('lamp', x, z, 0.6, 1.5, g, false);

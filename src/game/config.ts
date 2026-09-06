@@ -293,3 +293,11 @@ export const BOOST_DURATION = 10; // длительность форсажа / �
 export const BOOST_SPEED_MUL = 1.35; // +35% скорости
 export const BOOST_DAMAGE_MUL = 1.5; // +50% урона
 export const BOT_NAMES = ['Гроза', 'Барс', 'Кедр', 'Молот', 'Сокол', 'Вихрь', 'Ястреб', 'Клин', 'Байкал', 'Тайфун', 'Кремень', 'Зубр', 'Рысь', 'Утёс'];
+
+/** Состав команд из числа ботов. Единая математика для движка и UI сетапа. */
+export function getTeamCounts(bots: number, mode: GameMode): { red: number; blue: number; total: number } {
+  const total = bots + 1;
+  if (bots <= 0) return { red: 0, blue: 0, total };
+  const red = mode === 'capture' ? Math.ceil(total / 2) : bots;
+  return { red, blue: bots - red, total };
+}

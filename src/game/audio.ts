@@ -77,7 +77,19 @@ class AudioEngine {
     this.ctx = new AC();
     this.master = this.ctx.createGain();
     this.master.gain.value = this.muted ? 0 : this.volume;
-    this.master.connect(this.ctx.destination);
+    // Лимитер на мастер: залп 12 ботов + взрывы без него дают клиппинг
+    try {
+      const comp = this.ctx.createDynamicsCompressor();
+      comp.threshold.value = -18;
+      comp.knee.value = 20;
+      comp.ratio.value = 8;
+      comp.attack.value = 0.003;
+      comp.release.value = 0.2;
+      this.master.connect(comp);
+      comp.connect(this.ctx.destination);
+    } catch {
+      this.master.connect(this.ctx.destination);
+    }
     this.sfx = this.ctx.createGain();
     this.sfx.connect(this.master);
     this.amb = this.ctx.createGain();
@@ -100,7 +112,9 @@ class AudioEngine {
   ui(kind: 'click' | 'hover' | 'confirm' | 'deny' = 'click') {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
-    if (kind === 'hover' && now - this.lastUi < 0.04) return;
+    // hover троттлился, click/confirm — нет: спам очередью осцилляторов. 30мс достаточно.
+    const gate = kind === 'hover' ? 0.04 : kind === 'deny' ? 0 : 0.03;
+    if (gate > 0 && now - this.lastUi < gate) return;
     this.lastUi = now;
     const o = this.ctx.createOscillator();
     const g = this.ctx.createGain();
@@ -119,6 +133,8 @@ class AudioEngine {
   // ---- Выстрел ----
   shot(heavy = 1, distanceGain = 1, own = true) {
     if (!this.ctx) return;
+    // далекие чужие выстрелы неслышны — не плодим ноды зря (перестрелки 12 ботов)
+    if (!own && distanceGain < 0.06) return;
     const now = this.ctx.currentTime;
     const vol = (own ? 0.9 : 0.4) * distanceGain;
     // низкий удар
@@ -149,6 +165,7 @@ class AudioEngine {
   // ---- Попадание ----
   hit(gain = 1, metallic = true) {
     if (!this.ctx) return;
+    if (gain < 0.03) return;
     const now = this.ctx.currentTime;
     const n = this.noise();
     const f = this.ctx.createBiquadFilter();
@@ -178,6 +195,7 @@ class AudioEngine {
   // ---- Взрыв ----
   explosion(size = 1, gain = 1) {
     if (!this.ctx) return;
+    if (gain < 0.03) return;
     const now = this.ctx.currentTime;
     const n = this.noise();
     const f = this.ctx.createBiquadFilter();
@@ -238,6 +256,40 @@ class AudioEngine {
     o.stop(now + 0.4);
   }
 
+  // ---- Перезарядка готова / тик захвата ----
+  reloadReady() {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    if (now - this.lastUi < 0.15) return;
+    this.lastUi = now;
+    const o = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    o.type = 'triangle';
+    o.frequency.setValueAtTime(660, now);
+    o.frequency.exponentialRampToValueAtTime(990, now + 0.07);
+    g.gain.setValueAtTime(0.12, now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+    o.connect(g).connect(this.sfx);
+    o.start(now);
+    o.stop(now + 0.15);
+  }
+
+  captureTick() {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    if (now - this.lastUi < 0.4) return;
+    this.lastUi = now;
+    const o = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    o.type = 'sine';
+    o.frequency.value = 520;
+    g.gain.setValueAtTime(0.05, now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.1);
+    o.connect(g).connect(this.sfx);
+    o.start(now);
+    o.stop(now + 0.12);
+  }
+
   thunder() {
     if (!this.ctx) return;
     this.explosion(2.2, 0.5);
@@ -284,13 +336,13 @@ class AudioEngine {
   }
 
   setEngine(throttle: number, speedNorm: number, alive: boolean) {
-    if (!this.ctx || !this.engineOsc) return;
+    if (!this.ctx || !this.engineOsc || !this.engineOsc2 || !this.engineFilter || !this.engineGain) return;
     const t = this.ctx.currentTime;
     const rpm = alive ? 38 + speedNorm * 55 + throttle * 12 : 0;
     this.engineOsc.frequency.setTargetAtTime(Math.max(1, rpm), t, 0.15);
-    this.engineOsc2!.frequency.setTargetAtTime(Math.max(1, rpm * 1.51), t, 0.15);
-    this.engineFilter!.frequency.setTargetAtTime(200 + speedNorm * 500 + throttle * 200, t, 0.2);
-    this.engineGain!.gain.setTargetAtTime(alive ? 0.12 + throttle * 0.08 + speedNorm * 0.05 : 0, t, 0.2);
+    this.engineOsc2.frequency.setTargetAtTime(Math.max(1, rpm * 1.51), t, 0.15);
+    this.engineFilter.frequency.setTargetAtTime(200 + speedNorm * 500 + throttle * 200, t, 0.2);
+    this.engineGain.gain.setTargetAtTime(alive ? 0.12 + throttle * 0.08 + speedNorm * 0.05 : 0, t, 0.2);
   }
 
   // ---- Ветер / дождь ----

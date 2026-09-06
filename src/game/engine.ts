@@ -5,10 +5,11 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import {
   BattleConfig, BattleResult, EffectiveStats, ShellType, SHELLS, SHELL_ORDER, TankId, TANKS, TankSpec, Team, computeStats,
   DURATION_SECONDS, BOT_NAMES, UpgradeId, BOOST_DURATION, BOOST_DAMAGE_MUL, BOOST_SPEED_MUL,
-  PICKUP_RESPAWN_DM, PICKUP_RESPAWN_DEFAULT, BOT_DIFFICULTY_SPECS,
+  PICKUP_RESPAWN_DM, PICKUP_RESPAWN_DEFAULT, BOT_DIFFICULTY_SPECS, getTeamCounts,
 } from './config';
+import { REWARD_KILL, REWARD_DAMAGE, REWARD_CAPTURE, REWARD_OUTCOME, REWARD_SURVIVAL, REWARD_ACCURACY } from './economy';
 import { buildTank, TankModel, wreckify, setBeamOpacity, disposeTankModel } from './tankModel';
-import { buildWorld, World, Obstacle, CapPoint, Pickup, mulberry, freezeStatic } from './world';
+import { buildWorld, World, Obstacle, CapPoint, Pickup, mulberry, freezeStatic, LIGHTS_DARK_THRESHOLD } from './world';
 import { ParticleSystem, DebrisSystem, TrackMarks, WeatherSystem } from './effects';
 import { audio } from './audio';
 import { loadSettings, Settings } from './settings';
@@ -172,14 +173,16 @@ function ballisticPitch(v: number, d: number, h: number) {
 // Финальный предел вниз — касание своего корпуса (см. clampPitchForHull).
 const GUN_ELEV_MAX = 0.45;
 const GUN_DEP_MIN = -0.42;
-const GUN_DEP_MIN_BOT = -0.38;
+// Боты наводятся так же низко, как игрок: раньше -0.38 не доставал близкие низкие цели,
+// где игрок доставал, — бот в клинче беспомощно водил стволом над корпусом.
+const GUN_DEP_MIN_BOT = -0.42;
 
 export class GameEngine {
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
-  composer: EffectComposer;
-  private bloom: UnrealBloomPass;
+  /** Ленивый пост-эффект: создаётся только для ночных боёв на нормальном железе. */
+  composer: EffectComposer | null = null;
   private flashPool: { light: THREE.PointLight; life: number; max: number }[] = [];
   private flashCursor = 0;
   world!: World;
@@ -257,6 +260,14 @@ export class GameEngine {
   private aimTargets: THREE.Object3D[] = [];
   private aimTargetsDirty = true;
   private audioTimer = 0;
+  private captureTickTimer = 0;
+  private tracerTick = 0;
+  private destroyedVersion = 0;
+  private destroyedCache: { x: number; z: number; w: number; d: number }[] = [];
+  private destroyedCacheVersion = -1;
+  // переиспользуемые векторы выстрела — без new Vector3 на каждый выстрел
+  private tmpMuzzle = new THREE.Vector3();
+  private tmpShotDir = new THREE.Vector3();
 
   constructor(canvas: HTMLCanvasElement, cfg: BattleConfig, cb: EngineCallbacks) {
     this.canvas = canvas;
@@ -312,12 +323,11 @@ export class GameEngine {
     this.renderer.toneMappingExposure = 1.0;
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(this.baseFov, 1, 0.5, 700);
-    this.composer = new EffectComposer(this.renderer);
-    this.composer.addPass(new RenderPass(this.scene, this.camera));
-    this.bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.32, 0.5, 0.86);
-    this.composer.addPass(this.bloom);
+    // composer/bloom НЕ создаём заранее: на слабом железе и днём они не нужны,
+    // а каждый EffectComposer держит bloom-таргеты в памяти. См. ensureComposer().
     // на слабом железе пост-эффект сразу выключен — это один из главных пожирателей FPS
     this.usePost = !this.lowEnd;
+    this.syncBodyQuality();
     const particleCap = this.lowEnd ? 1600 : 2500;
     this.particles = new ParticleSystem(particleCap);
     this.scene.add(this.particles.points);
@@ -348,6 +358,38 @@ export class GameEngine {
     this.notify('Потерян WebGL-контекст. Перезапустите бой.', 'bad');
   };
 
+  private syncBodyQuality() {
+    try {
+      const q = this.lowEnd ? 'low' : this.settings.quality === 'high' ? 'high' : this.settings.quality === 'low' ? 'low' : 'auto';
+      document.body.dataset.quality = q;
+    } catch { /* */ }
+  }
+
+  /** Создать composer по требованию (только ночь + нормальное железо). */
+  private ensureComposer() {
+    if (this.composer || this.disposed) return;
+    try {
+      const composer = new EffectComposer(this.renderer);
+      composer.addPass(new RenderPass(this.scene, this.camera));
+      const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.32 + this.world.env.darkFactor * 0.28, 0.5, 0.86);
+      composer.addPass(bloom);
+      this.composer = composer;
+      try {
+        const el = this.canvas.parentElement ?? this.canvas;
+        const w = el.clientWidth || window.innerWidth || 800;
+        const h = el.clientHeight || window.innerHeight || 600;
+        composer.setSize(w, h);
+      } catch { /* */ }
+    } catch { /* composer опционален — упадём на прямой рендер */ }
+  }
+
+  /** Освободить RT bloom (деградация / переход на low): память возвращается сразу. */
+  private releaseComposer() {
+    if (!this.composer) return;
+    try { this.composer.dispose(); } catch { /* */ }
+    this.composer = null;
+  }
+
   private resize() {
     if (this.disposed) return;
     const el = this.canvas.parentElement ?? this.canvas;
@@ -361,9 +403,14 @@ export class GameEngine {
       /* */
     }
     this.renderer.setSize(w, h, false);
-    this.composer.setSize(w, h);
+    try { this.composer?.setSize(w, h); } catch { /* */ }
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    // размер частиц зависит от высоты вьюпорта и FOV — иначе на широких/узких экранах пыль не та
+    try {
+      const pr = this.renderer.getPixelRatio() || 1;
+      this.particles.updateScale(h * pr, this.camera.fov);
+    } catch { /* */ }
   }
 
   // Адаптивная деградация: если средний кадр > ~26мс — режем pixelRatio, bloom, тени
@@ -379,10 +426,12 @@ export class GameEngine {
     try {
       if (this.degraded === 1) {
         this.usePost = false;
+        this.releaseComposer();
         this.renderer.setPixelRatio(1);
         this.resize();
       } else if (this.degraded === 2) {
         this.usePost = false;
+        this.releaseComposer();
         this.renderer.setPixelRatio(0.8);
         this.resize();
         try { this.world.env.sun.castShadow = false; } catch { /* */ }
@@ -397,7 +446,8 @@ export class GameEngine {
             else try { mat.needsUpdate = true; } catch { /* */ }
           });
         } catch { /* */ }
-        try { localStorage.setItem('steel-assault-lowfx', '1'); } catch { /* */ }
+        // НЕ пишем липкий steel-assault-lowfx: разовая просадка (фоновый таб, прогрев шейдеров)
+        // иначе навсегда оставляла low до чистки storage. Постоянный low — только явной настройкой.
       }
     } catch { /* */ }
   }
@@ -407,7 +457,7 @@ export class GameEngine {
     const seed = Math.floor(Math.random() * 1e9);
     this.world = buildWorld(this.scene, this.cfg, seed);
     this.hemiBase = this.world.env.hemi.intensity;
-    this.weather = new WeatherSystem(this.scene, this.cfg.weather);
+    this.weather = new WeatherSystem(this.scene, this.cfg.weather, this.lowEnd);
     this.timeLeft = this.cfg.mode === 'capture' ? DURATION_SECONDS[this.cfg.duration] : 0;
 
     // Игрок
@@ -419,8 +469,7 @@ export class GameEngine {
     // Боты — характеристики зависят от выбранной сложности
     const rnd = mulberry(seed ^ 0x5bd1e995);
     const names = [...BOT_NAMES].sort(() => rnd() - 0.5);
-    const total = this.cfg.bots + 1;
-    const redCount = this.cfg.mode === 'capture' ? Math.ceil(total / 2) : this.cfg.bots;
+    const { red: redCount } = getTeamCounts(this.cfg.bots, this.cfg.mode);
     const ids: TankId[] = ['t34', 't100lt', 'e100'];
     const diff = BOT_DIFFICULTY_SPECS[this.cfg.botDifficulty ?? 'veteran'] ?? BOT_DIFFICULTY_SPECS.veteran;
     for (let i = 0; i < this.cfg.bots; i++) {
@@ -444,7 +493,8 @@ export class GameEngine {
 
     // Освещение для тёмного времени (ночь/вечер/закат/сумерки/туман): фары + прожектора + bloom
     const dark = this.world.env.darkFactor;
-    this.bloom.strength = 0.32 + dark * 0.28;
+    // bloom создастся лениво в ensureComposer() с той же силой — здесь только решаем, нужен ли он
+    this.usePost = this.usePost && dark > 0.3;
     // глубокой ночью солнце почти не светит — отключаем дорогой проход теней
     this.world.env.sun.castShadow = dark < 0.75;
     for (const t of this.tanks) this.applyTankLights(t);
@@ -456,15 +506,18 @@ export class GameEngine {
       this.scene.add(fl);
       this.flashPool.push({ light: fl, life: 0, max: 1 });
     }
-    if (dark > 0.35) {
+    if (dark > LIGHTS_DARK_THRESHOLD) {
       this.notify('Тёмное время: включены фонари и прожектора танков', 'info');
     }
 
     this.camYaw = this.player.yaw;
     this.player.turretYaw = this.player.yaw;
     if (this.cfg.mode === 'deathmatch') {
-      this.notify('Бонусы на карте: ✚ ремонт, ◆ урон +50% на 10 с, ➤ форсаж на 10 с — ищите световые столбы', 'info');
-      this.notify('Укрытия: дома, ангары с рыжей крышей, доты, бетонные блоки', 'info');
+      if (this.cfg.bots === 0) this.notify('Тренировка: противников нет. Практикуйте вождение и стрельбу по постройкам', 'info');
+      else {
+        this.notify('Бонусы на карте: ✚ ремонт, ◆ урон +50% на 10 с, ➤ форсаж на 10 с — ищите световые столбы', 'info');
+        this.notify('Укрытия: дома, ангары с рыжей крышей, доты, бетонные блоки', 'info');
+      }
     }
     this.bindInput();
     audio.init();
@@ -478,8 +531,8 @@ export class GameEngine {
 
   private applyTankLights(t: Tank) {
     const dark = this.world.env.darkFactor;
-    const on = dark > 0.35 && t.alive;
-    const k = Math.max(0, Math.min(1, (dark - 0.35) / 0.65)); // 0..1 плавное включение
+    const on = dark > LIGHTS_DARK_THRESHOLD && t.alive;
+    const k = Math.max(0, Math.min(1, (dark - LIGHTS_DARK_THRESHOLD) / (1 - LIGHTS_DARK_THRESHOLD))); // 0..1 плавное включение
     for (const h of t.model.headlights) {
       h.visible = on;
       h.intensity = on ? (t.isPlayer ? 60 + 220 * k : 30 + 110 * k) : 0;
@@ -497,7 +550,7 @@ export class GameEngine {
   // поэтому ночью оставляем реальный свет только игроку + 3 ближайшим (остальные — фейк-конусы).
   private updateLightCulling() {
     const dark = this.world.env.darkFactor;
-    if (dark <= 0.35) return;
+    if (dark <= LIGHTS_DARK_THRESHOLD) return;
     const px = this.player.x;
     const pz = this.player.z;
     // находим 3 ближайших живых бота
@@ -671,8 +724,15 @@ export class GameEngine {
     if (this.world) this.applyTankLights(t);
   }
 
-  private isSpotFree(x: number, z: number, r: number, self: Tank | null) {
+  private isSpotFree(x: number, z: number, r: number, self: Tank | null, avoidCaps = true) {
     if (Math.abs(x) > this.world.half - r || Math.abs(z) > this.world.half - r) return false;
+    // Не спавнимся на точку захвата: раньше респаун мог кинуть прямо на точку под огонь.
+    // Касается только спавна (avoidCaps) — блуждание и поиск укрытий точки не избегают.
+    if (avoidCaps && this.world) {
+      for (const cp of this.world.capPoints) {
+        if (Math.hypot(cp.x - x, cp.z - z) < cp.radius + 3) return false;
+      }
+    }
     for (const o of this.world.obstacles) {
       if (o.kind === 'wall') {
         // стены — граница арены, для спавна их игнорим (кламп по half уже выше)
@@ -731,12 +791,22 @@ export class GameEngine {
     // при Авто не дёргаем эвристику, только при явном выборе
     if (s.quality !== 'auto' && wantLow !== this.lowEnd) {
       this.lowEnd = wantLow;
-      this.usePost = !this.lowEnd;
+      this.usePost = !this.lowEnd && this.world.env.darkFactor > 0.3;
+      // переход на low сразу освобождает bloom-таргеты, переход на high — создаст по требованию
+      if (this.lowEnd) this.releaseComposer();
       try {
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this.lowEnd ? 1 : 1.25));
         this.resize();
       } catch { /* */ }
     }
+    try {
+      this.camera.fov = this.baseFov;
+      this.camera.updateProjectionMatrix();
+      const el = this.canvas.parentElement ?? this.canvas;
+      const h = el.clientHeight || window.innerHeight || 600;
+      this.particles.updateScale(h * (this.renderer.getPixelRatio() || 1), this.camera.fov);
+    } catch { /* */ }
+    this.syncBodyQuality();
   }
   private onMouseDown = (e: MouseEvent) => {
     if (this.paused || this.ended) return;
@@ -859,9 +929,13 @@ export class GameEngine {
     try {
       // днём bloom почти не виден — рендерим напрямую, это дешевле композера.
       // Ночью bloom оставляем (фары/фонари), на слабом железе — никогда.
+      // Composer ленивый: RT под bloom аллоцируются только когда реально понадобились.
       const needPost = this.usePost && this.world.env.darkFactor > 0.3;
-      if (needPost) this.composer.render();
-      else this.renderer.render(this.scene, this.camera);
+      if (needPost) {
+        this.ensureComposer();
+        if (this.composer) this.composer.render();
+        else this.renderer.render(this.scene, this.camera);
+      } else this.renderer.render(this.scene, this.camera);
     } catch (e) {
       console.error('[engine] render failed', e);
     }
@@ -1027,6 +1101,7 @@ export class GameEngine {
       if (t.reload <= 0) {
         t.reload = 0;
         if (t.clip <= 0) t.clip = t.stats.magazine;
+        if (t.isPlayer && t.alive) audio.reloadReady();
       }
     }
     // мобильность
@@ -1393,12 +1468,13 @@ export class GameEngine {
     // Если дуло за стеной (ствол просунули сквозь дом) — вылет перед стеной и удар в стену,
     // а не выстрел сквозь неё. Поэтому читерить просовыванием ствола нельзя.
     const free = this.getBarrelFreeMuzzle(t, t.x, t.z, t.yaw, t.turretYaw);
-    const mp = new THREE.Vector3(free.x, free.y, free.z);
+    // переиспользуемые векторы: выстрелов много, аллокации на каждый дают GC-спайки
+    const mp = this.tmpMuzzle.set(free.x, free.y, free.z);
     const spread = (t.modules.gun.hp < 0.5 ? 0.02 : 0.004) * (t.isPlayer ? 1 : 1.2);
     const yaw = t.turretYaw + (Math.random() - 0.5) * spread;
     const pitch = t.pitch + (Math.random() - 0.5) * spread;
     const v = t.stats.shellSpeed * shell.speedMul;
-    const dir = new THREE.Vector3(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch));
+    const dir = this.tmpShotDir.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch));
     const mesh = new THREE.Mesh(this.tracerGeo, this.shellMats[t.shell]);
     mesh.position.copy(mp);
     this.scene.add(mesh);
@@ -1499,8 +1575,13 @@ export class GameEngine {
       p.mesh.lookAt(p.x + p.vx, p.y + p.vy, p.z + p.vz);
       p.mesh.rotateX(Math.PI / 2);
       if (p.light) p.light.position.set(p.x, p.y, p.z);
-      // трассер
-      this.particles.emit({ x: p.x, y: p.y, z: p.z, color: SHELLS[p.shell].color, life: 0.18, size: 0.7, alpha: 0.7 });
+      // трассер: был emit на снаряд каждый кадр (10 снарядов = 600 частиц/с только на следы).
+      // На low — через кадр, далекие (>140м от игрока) не светим вовсе — их всё равно не видно.
+      this.tracerTick++;
+      const far = (p.x - this.player.x) * (p.x - this.player.x) + (p.z - this.player.z) * (p.z - this.player.z) > 140 * 140;
+      if (!far && (!this.lowEnd || (this.tracerTick & 1) === 0)) {
+        this.particles.emit({ x: p.x, y: p.y, z: p.z, color: SHELLS[p.shell].color, life: 0.22, size: 0.7, alpha: 0.7 });
+      }
     }
     for (const p of remove) {
       this.scene.remove(p.mesh);
@@ -1517,10 +1598,15 @@ export class GameEngine {
     const gain = clamp(1 - distToPlayer / 140, 0.15, 1);
     // прямое попадание
     if (tank && this.isAlly(p.owner, tank)) {
-      // дружественный огонь отключён: только искры
+      // дружественный огонь отключён: только искры + цена для своих.
+      // Раньше союзником можно было безнаказанно щититься и спамить сквозь него:
+      // теперь игрок за каждый такой выстрел получает +1.5с к перезарядке.
       this.particles.emit({ x, y, z, spread: 8, color: 0xffcf70, life: 0.4, size: 0.7, gravity: 12, count: 8 });
       audio.hit(gain * 0.5, true);
-      if (p.owner.isPlayer) this.notify('Не стреляйте по союзникам!', 'warn');
+      if (p.owner.isPlayer) {
+        p.owner.reload = Math.max(p.owner.reload, 1.5);
+        this.notify('Не стреляйте по союзникам! Перезарядка +1.5 с', 'warn');
+      }
       return;
     }
     if (tank) {
@@ -1579,6 +1665,13 @@ export class GameEngine {
       if (t.invuln > 0 && attacker.isPlayer) this.notify('Цель под защитой возрождения', 'warn');
       return;
     }
+    // Налог на снайпинг: дальше 80м урон тает до −40% на 180м+.
+    // Раньше дистанции не было вовсе — дальний калибр решал без positioning-наказания.
+    // Касается всех одинаково (и игрока, и ботов с новой дальностью 120–180м).
+    try {
+      const d = Math.hypot(attacker.x - hx, attacker.z - hz);
+      if (d > 80) dmg *= Math.max(0.6, 1 - (d - 80) * 0.004);
+    } catch { /* */ }
     dmg = Math.round(dmg);
     t.hp -= dmg;
     t.lastHitTime = this.time;
@@ -1625,6 +1718,7 @@ export class GameEngine {
     if (o.hp > 0) return;
     o.alive = false;
     o.blocksShots = false;
+    this.destroyedVersion++;
     const x = o.x, z = o.z;
     const h = o.h;
     // крупные руины остаются препятствием для движения (уменьшенный футпринт),
@@ -1637,6 +1731,11 @@ export class GameEngine {
       o.r *= 0.65;
     }
     this.scene.remove(o.mesh);
+    // NOTE: оригинал осознанно не dispose'им здесь: меши домов/ангаров используют общие
+    // boxGeo/материалы из world (один буфер на все здания) + уникальные merged-окна из
+    // world.disposables. Ранний dispose shared-ресурсов сломал бы соседние здания,
+    // а уникальные добьёт world.dispose() в конце боя. Утечки между боями нет:
+    // руины трекаются в rubbleDisposables и чистятся в dispose().
     // обломки
     const col = o.kind === 'crate' ? 0x6a4a2a : o.kind === 'building' || o.kind === 'hangar' ? 0x7a7568 : 0x8a8a84;
     this.debris.burst(x, h * 0.3, z, bigRuins ? 14 : 6, bigRuins ? 9 : 6, col, bigRuins ? 2 : 1);
@@ -1835,6 +1934,14 @@ export class GameEngine {
           this.notify(`Точка ${cp.letter} нейтрализована`, 'warn');
         }
       }
+      // тик захвата для игрока на точке (не чаще раза в 1.5с) — раньше захват шёл молча
+      if (!cp.contested && cp.capturing === 0 && blueTanks.includes(this.player) && this.player.alive) {
+        this.captureTickTimer -= dt;
+        if (this.captureTickTimer <= 0) {
+          this.captureTickTimer = 1.5;
+          audio.captureTick();
+        }
+      }
       // визуал
       const owner = cp.owner;
       const capCol = cp.contested ? 0xffb020 : cp.capturing === 0 ? 0x4aa3ff : cp.capturing === 1 ? 0xff5a5a : owner === 0 ? 0x4aa3ff : owner === 1 ? 0xff5a5a : 0xd8dcc8;
@@ -1898,7 +2005,7 @@ export class GameEngine {
     return true;
   }
 
-  private pathClear(x: number, z: number, dirX: number, dirZ: number, len: number, r: number) {
+  private pathClear(x: number, z: number, dirX: number, dirZ: number, len: number, r: number, self: Tank | null = null) {
     // шаг 3м вместо 2м — меньше точек, для рулёжки достаточно
     const steps = Math.ceil(len / 3);
     const obs = this.world.obstacles;
@@ -1924,8 +2031,10 @@ export class GameEngine {
           else if ((dx > 0 && dz <= 0 && dx < r) || (dz > 0 && dx <= 0 && dz < r)) return false;
         }
       }
+      // Раньше видели только остовы: боты ехали сквозь живые танки, упирались,
+      // и только потом resolveTankCollisions их расталкивал — отсюда ложные stuck.
       for (const t of this.tanks) {
-        if (!t.wreck) continue;
+        if (t === self || (!t.alive && !t.wreck)) continue;
         const wx = px - t.x, wz = pz - t.z;
         const wr = t.spec.radius + r;
         if (wx * wx + wz * wz < wr * wr) return false;
@@ -1952,6 +2061,9 @@ export class GameEngine {
       let bestScore = 1e9;
       for (const e of this.tanks) {
         if (!e.alive || !this.isEnemy(t, e)) continue;
+        // Не тратим БК в защиту возрождения: урон всё равно игнорируется (damageTank),
+        // а бот раньше продолжал целиться и жечь перезарядку в неуязвимого.
+        if (e.invuln > 0) continue;
         const dxe = e.x - t.x, dze = e.z - t.z;
         const d = Math.sqrt(dxe * dxe + dze * dze);
         // распределение фокуса
@@ -1966,9 +2078,16 @@ export class GameEngine {
         }
       }
       ai.target = best;
-      // выбор снаряда — тоже здесь, а не каждый кадр
-      if (best) t.shell = best.spec.id === 't100lt' && Math.random() < 0.3 ? 'HE' : 'AP';
-    } else if (ai.target && !ai.target.alive) ai.target = null;
+      // выбор снаряда — тоже здесь, а не каждый кадр.
+      // AP — основной; HEAT по тяжам в упор (сплэш+модули); HE добивать/по лёгким.
+      if (best) {
+        const bd = Math.hypot(best.x - t.x, best.z - t.z);
+        const roll = Math.random();
+        if (best.spec.id === 'e100' && bd < 60 && roll < 0.5) t.shell = 'HEAT';
+        else if ((best.hp / best.maxHp < 0.25 && bd < 50) || (best.spec.id === 't100lt' && roll < 0.3)) t.shell = 'HE';
+        else t.shell = 'AP';
+      }
+    } else if (ai.target && (!ai.target.alive || ai.target.invuln > 0)) ai.target = null;
     const target = ai.target;
     const dxt = target ? target.x - t.x : 0;
     const dzt = target ? target.z - t.z : 0;
@@ -1985,7 +2104,9 @@ export class GameEngine {
       ai.stateTimer = 2 + Math.random() * 2.5;
       const lowHp = t.hp / t.maxHp < 0.35;
       const longReload = t.reload > 2.5 && t.clip === 0;
-      if (this.cfg.mode === 'capture' && (!target || distT > 70 || Math.random() < 0.45)) {
+      // В дуэли (<45м, цель видна) не бросаем бой ради точки: раньше rnd<0.45 уводил
+      // бота с точки/из боя посреди перестрелки. Уходим на точку без цели, издалека или с шансом.
+      if (this.cfg.mode === 'capture' && (!target || distT > 70 || (distT > 45 && Math.random() < 0.45))) {
         ai.state = 'objective';
         ai.objective = this.chooseObjective(t);
         ai.moveTarget = ai.objective ? { x: ai.objective.x + (Math.random() - 0.5) * 10, z: ai.objective.z + (Math.random() - 0.5) * 10 } : null;
@@ -2085,13 +2206,13 @@ export class GameEngine {
         let chosen = desired;
         let found = false;
         // 5 направлений вместо 11 — достаточно для объезда, в 2 раза дешевле.
-        // Полный веер (11) проверяем только на think-тике при застревании.
-        const offsets = doThink && ai.stuck > 0.6
+        // Полный веер (11) проверяем только на think-тике при застревании — раньше, чем встать (0.4с).
+        const offsets = doThink && ai.stuck > 0.4
           ? [0, 0.4, -0.4, 0.8, -0.8, 1.3, -1.3, 1.9, -1.9, 2.6, -2.6]
           : [0, 0.5, -0.5, 1.1, -1.1];
         for (let oi = 0; oi < offsets.length; oi++) {
           const a = desired + offsets[oi];
-          if (this.pathClear(t.x, t.z, Math.sin(a), Math.cos(a), probe, r)) {
+          if (this.pathClear(t.x, t.z, Math.sin(a), Math.cos(a), probe, r, t)) {
             chosen = a;
             found = true;
             break;
@@ -2110,12 +2231,12 @@ export class GameEngine {
           } else throttle = Math.abs(diff) < 1.0 ? 1 : 0.35;
           if (!found) throttle = -0.5;
         }
-        // застревание
+        // застревание: было 1.4с стояния под огнём — 2.6с до начала отъезда. Теперь 0.9с.
         if (Math.abs(t.vel) < 0.5 && throttle > 0.3) {
           ai.stuck += dt;
-          if (ai.stuck > 1.4) {
+          if (ai.stuck > 0.9) {
             ai.stuck = 0;
-            ai.unstick = 1.2;
+            ai.unstick = 1.0;
             ai.strafeDir *= -1;
           }
         } else ai.stuck = Math.max(0, ai.stuck - dt);
@@ -2163,9 +2284,16 @@ export class GameEngine {
       const hd = Math.hypot(ax - t.x, az - t.z);
       const wantBotPitch = clamp(ballisticPitch(v, hd, 1.4 - this.getMuzzleHeight(t)), GUN_DEP_MIN_BOT, 0.4);
       t.pitch = this.clampPitchForHull(t, wantBotPitch);
-      if (Math.abs(d) < 0.035 && distT < 120 && los && t.reload <= 0 && !t.modules.gun.broken) {
-        if (Math.random() < 0.6 + ai.skill * 0.4) this.tryFire(t);
-        else t.reload = 0.3;
+      // Дальность по скиллу: было 120м всем — снайпинга не было, элита душила в упор одинаково с рекрутом.
+      // Свежий LOS вблизи: кэш 5Гц протухает, когда цель только ушла за стену, — бот жег снаряд в стену.
+      // Проверка только в момент готовности выстрела (|d| мал), не каждый кадр — дёшево.
+      const maxRange = 120 + ai.skill * 60;
+      if (Math.abs(d) < 0.035 && distT < maxRange && t.reload <= 0 && !t.modules.gun.broken) {
+        const fireLos = distT < 60 ? this.hasLOS(t.x, t.z, target.x, target.z) : los;
+        if (fireLos) {
+          if (Math.random() < 0.6 + ai.skill * 0.4) this.tryFire(t);
+          else t.reload = 0.3;
+        }
       }
     } else {
       // башня по ходу движения (тоже с упором ствола)
@@ -2183,7 +2311,7 @@ export class GameEngine {
     for (let i = 0; i < 20; i++) {
       const x = (Math.random() * 2 - 1) * (this.world.half - 14);
       const z = (Math.random() * 2 - 1) * (this.world.half - 14);
-      if (this.isSpotFree(x, z, 4, null)) return { x, z };
+      if (this.isSpotFree(x, z, 4, null, false)) return { x, z };
     }
     return { x: 0, z: 0 };
   }
@@ -2215,14 +2343,19 @@ export class GameEngine {
     let best: { x: number; z: number } | null = null;
     let bestD = 1e9;
     for (const o of this.world.obstacles) {
-      if (!o.alive || o.kind === 'wall' || o.kind === 'tree' || o.kind === 'lamp' || o.h < 2.5) continue;
-      const d = Math.hypot(o.x - t.x, o.z - t.z);
+      if (o.kind === 'wall' || o.kind === 'tree' || o.kind === 'lamp') continue;
+      // Руины (разрушенные дома/ангары, h~1.6м) — годятся для hull-down, раньше игнор (было h>=2.5 + alive).
+      const effH = o.rubble ? 1.6 : o.h;
+      if (effH < 1.4) continue;
+      if (!o.alive && !o.rubble) continue;
+      // Руины не блокируют снаряды (blocksShots=false) — как укрытие слабее, берём дальше целых
+      const d = Math.hypot(o.x - t.x, o.z - t.z) + (!o.alive ? 15 : 0);
       if (d > 55) continue;
       const ax = o.x - enemy.x, az = o.z - enemy.z;
       const l = Math.hypot(ax, az) || 1;
       const px = o.x + (ax / l) * (o.r + t.spec.radius + 2);
       const pz = o.z + (az / l) * (o.r + t.spec.radius + 2);
-      if (!this.isSpotFree(px, pz, t.spec.radius, t)) continue;
+      if (!this.isSpotFree(px, pz, t.spec.radius, t, false)) continue;
       if (d < bestD) {
         bestD = d;
         best = { x: px, z: pz };
@@ -2375,7 +2508,9 @@ export class GameEngine {
         const ox = o.x - x, oz = o.z - z;
         if (ox > rr || ox < -rr || oz > rr || oz < -rr) continue;
         if (o.shape === 'circle') {
-          if (ox * ox + oz * oz < 0.9 * 0.9) return len * f;
+          // был фикс 0.9м — камера проходила сквозь крупные скалы/холмы (r 3-13м)
+          const cr = o.r + 0.6;
+          if (ox * ox + oz * oz < cr * cr) return len * f;
         } else if (Math.abs(x - o.x) < o.hw + 0.6 && Math.abs(z - o.z) < o.hd + 0.6) {
           return len * f;
         }
@@ -2437,6 +2572,12 @@ export class GameEngine {
     if (Math.abs(targetFov - this.camera.fov) > 0.05) {
       this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 5);
       this.camera.updateProjectionMatrix();
+      // uScale частиц зависит от FOV — обновляем вместе с проекцией, иначе пыль «дышит» на скорости
+      try {
+        const el = this.canvas.parentElement ?? this.canvas;
+        const h = el.clientHeight || window.innerHeight || 600;
+        this.particles.updateScale(h * (this.renderer.getPixelRatio() || 1), this.camera.fov);
+      } catch { /* */ }
     }
     // точка прицела: луч из центра экрана — только 12 Гц + переиспользуемый массив целей
     if (p.alive) {
@@ -2496,8 +2637,10 @@ export class GameEngine {
       return;
     }
     if (this.cfg.mode === 'deathmatch') {
+      // Тренировка (0 ботов): автопобеды нет — бесконечная свободная практика до выхода
       const enemiesAlive = this.tanks.filter((t) => t !== this.player && t.alive).length;
-      if (enemiesAlive === 0 || !this.player.alive) {
+      const hasEnemies = this.tanks.some((t) => t !== this.player);
+      if (hasEnemies && (enemiesAlive === 0 || !this.player.alive)) {
         this.ended = true;
         this.endTimer = enemiesAlive === 0 ? 2 : 3.5;
       }
@@ -2525,13 +2668,14 @@ export class GameEngine {
     else outcome = this.score.blue > this.score.red ? 'win' : this.score.blue < this.score.red ? 'lose' : 'draw';
     const b: BattleResult['breakdown'] = [];
     const s = this.stats;
-    b.push({ label: `Уничтожено противников × ${s.kills}`, xp: s.kills * 130, gold: s.kills * 6 });
-    b.push({ label: `Нанесённый урон ${Math.round(s.damage)}`, xp: Math.round(s.damage * 0.09), gold: Math.round(s.damage * 0.004) });
-    if (this.cfg.mode === 'capture') b.push({ label: `Захваты точек × ${s.captures}`, xp: s.captures * 90, gold: s.captures * 8 });
-    b.push({ label: outcome === 'win' ? 'Победа' : outcome === 'draw' ? 'Ничья' : 'Поражение', xp: outcome === 'win' ? 420 : outcome === 'draw' ? 200 : 90, gold: outcome === 'win' ? 45 : outcome === 'draw' ? 20 : 8 });
-    if (this.player.alive && this.cfg.mode === 'deathmatch') b.push({ label: 'Выживание', xp: 150, gold: 10 });
+    // Тарифы — из economy.ts (там же строки для сводки до боя). Не дублировать числа здесь.
+    b.push({ label: `Уничтожено противников × ${s.kills}`, xp: s.kills * REWARD_KILL.xp, gold: s.kills * REWARD_KILL.gold });
+    b.push({ label: `Нанесённый урон ${Math.round(s.damage)}`, xp: Math.round(s.damage * REWARD_DAMAGE.xpPerDamage), gold: Math.round(s.damage * REWARD_DAMAGE.goldPerDamage) });
+    if (this.cfg.mode === 'capture') b.push({ label: `Захваты точек × ${s.captures}`, xp: s.captures * REWARD_CAPTURE.xp, gold: s.captures * REWARD_CAPTURE.gold });
+    b.push({ label: outcome === 'win' ? 'Победа' : outcome === 'draw' ? 'Ничья' : 'Поражение', xp: REWARD_OUTCOME[outcome].xp, gold: REWARD_OUTCOME[outcome].gold });
+    if (this.player.alive && this.cfg.mode === 'deathmatch') b.push({ label: 'Выживание', xp: REWARD_SURVIVAL.xp, gold: REWARD_SURVIVAL.gold });
     const acc = s.shots > 0 ? s.hits / s.shots : 0;
-    if (acc > 0.6 && s.shots >= 5) b.push({ label: `Точность ${Math.round(acc * 100)}%`, xp: 80, gold: 5 });
+    if (acc > REWARD_ACCURACY.minAcc && s.shots >= REWARD_ACCURACY.minShots) b.push({ label: `Точность ${Math.round(acc * 100)}%`, xp: REWARD_ACCURACY.xp, gold: REWARD_ACCURACY.gold });
     const result: BattleResult = {
       outcome, mode: this.cfg.mode, score: { ...this.score }, kills: s.kills, damage: Math.round(s.damage), captures: s.captures, shotsFired: s.shots, shotsHit: s.hits,
       survived: this.player.alive, timeAlive: s.timeAlive,
@@ -2547,6 +2691,11 @@ export class GameEngine {
     const allies = this.tanks.filter((t) => this.isAlly(p, t));
     let inPoint: string | null = null;
     for (const cp of this.world.capPoints) if (Math.hypot(cp.x - p.x, cp.z - p.z) < cp.radius) inPoint = cp.letter;
+    // destroyed меняется только при разрушениях — кэшируем, а не filter по всем obstacles 8 раз/с
+    if (this.destroyedCacheVersion !== this.destroyedVersion) {
+      this.destroyedCache = this.world.obstacles.filter((o) => !o.alive && o.kind !== 'wall' && o.kind !== 'lamp').map((o) => ({ x: o.x, z: o.z, w: o.hw * 2, d: o.hd * 2 }));
+      this.destroyedCacheVersion = this.destroyedVersion;
+    }
     return {
       hp: Math.round(p.hp), maxHp: p.maxHp, alive: p.alive, respawnIn: p.alive ? 0 : Math.max(0, p.respawnTimer),
       reload: p.reloadTotal > 0 ? 1 - p.reload / p.reloadTotal : 1, reloadLeft: p.reload, clip: p.clip, magazine: p.stats.magazine,
@@ -2564,7 +2713,7 @@ export class GameEngine {
         player: { x: p.x, z: p.z, yaw: p.yaw, turretYaw: p.turretYaw },
         tanks: this.tanks.filter((t) => t !== p).map((t) => ({ x: t.x, z: t.z, team: this.cfg.mode === 'deathmatch' ? 1 : t.team, alive: t.alive })),
         pickups: this.world.pickups.map((pk) => ({ x: pk.x, z: pk.z, type: pk.type.id, active: pk.active })),
-        destroyed: this.world.obstacles.filter((o) => !o.alive && o.kind !== 'wall' && o.kind !== 'lamp').map((o) => ({ x: o.x, z: o.z, w: o.hw * 2, d: o.hd * 2 })),
+        destroyed: this.destroyedCache,
       },
       canFire: p.reload <= 0 && !p.modules.gun.broken && p.ammo[p.shell] > 0,
       aimDistance: this.aimDistance, inPoint, invuln: p.invuln, pointerLocked: this.pointerLocked, hitMarker: this.hitMarker, kills: this.stats.kills,
@@ -2682,7 +2831,9 @@ export class GameEngine {
     try { this.tracerGeo.dispose(); } catch { /* */ }
     // агрессивный traverse больше не диспоузит shared-геометрию вслепую —
     // модели уже освобождены через disposeTankModel, мир — через world.dispose()
-    try { this.composer.dispose(); } catch { /* */ }
+    // composer ленивый — может не существовать (день / low): чистим если был
+    try { this.composer?.dispose(); } catch { /* */ }
+    this.composer = null;
     try { this.renderer.dispose(); } catch { /* */ }
     // ВАЖНО: без forceContextLoss() — он убивает контекст canvas,
     // и повторный mount на том же элементе (StrictMode в dev / retry)

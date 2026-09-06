@@ -4,6 +4,7 @@ import { GameEngine, HudSnapshot } from './game/engine';
 import { Progress, cloneProgress, defaultProgress, normalizeProgress } from './game/progress';
 import { loadProfiles, saveProfiles, addAccount, removeAccount, Profiles, ADMIN_NAME, isValidAccountName, exportProfiles, importProfilesJson } from './game/profiles';
 import { getRankIndex, promotionGoldReward, canUseTank } from './game/ranks';
+import { loadSettings, syncBodyQualityAttr } from './game/settings';
 import { audio } from './game/audio';
 import Hangar from './ui/Hangar';
 import BattleSetup from './ui/BattleSetup';
@@ -27,7 +28,7 @@ function loadSetup(): Setup {
     const j = JSON.parse(raw) as Partial<Setup>;
     return {
       mode: j.mode === 'capture' || j.mode === 'deathmatch' ? j.mode : fb.mode,
-      bots: typeof j.bots === 'number' && Number.isFinite(j.bots) ? Math.max(1, Math.min(12, Math.floor(j.bots))) : fb.bots,
+      bots: typeof j.bots === 'number' && Number.isFinite(j.bots) ? Math.max(0, Math.min(12, Math.floor(j.bots))) : fb.bots,
       botDifficulty: (BOT_DIFFICULTIES as string[]).includes(j.botDifficulty as string) ? (j.botDifficulty as BotDifficulty) : fb.botDifficulty,
       biome: (BIOMES as string[]).includes(j.biome as string) ? (j.biome as Setup['biome']) : fb.biome,
       time: (TIMES as string[]).includes(j.time as string) ? (j.time as Setup['time']) : fb.time,
@@ -75,6 +76,11 @@ export default function App() {
   const [battleCfg, setBattleCfg] = useState<BattleConfig | null>(null);
   const [battleId, setBattleId] = useState(0);
   const [promo, setPromo] = useState<Promotion | null>(null);
+
+  // body[data-quality] для CSS (гашение blur на low) — до первого боя, пока движка нет
+  useEffect(() => {
+    try { syncBodyQualityAttr(loadSettings().quality); } catch { /* */ }
+  }, []);
 
   const setProgress = (p: Progress) => {
     setProfiles((prev) => {

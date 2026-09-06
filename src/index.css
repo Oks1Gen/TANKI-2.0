@@ -404,7 +404,7 @@ select option {
 }
 .modal-panel {
   width: min(480px, 94vw);
-  max-height: 88vh;
+  max-height: min(88vh, 88dvh);
   overflow-y: auto;
   box-shadow: var(--shadow-pop), inset 0 1px 0 rgba(255, 255, 255, 0.06);
   animation: modal-in 0.22s cubic-bezier(0.2, 1.2, 0.4, 1);
@@ -418,7 +418,7 @@ select option {
 /* Сегмент-контроль табов. */
 .seg {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   gap: 6px;
   padding: 6px;
   background: rgba(13, 18, 14, 0.85);
@@ -877,6 +877,20 @@ select option {
 ::-webkit-scrollbar-track { background: #0d120e; }
 ::-webkit-scrollbar-thumb { background: #3a4c3a; border-radius: 999px; border: 1px solid #0d120e; }
 ::-webkit-scrollbar-thumb:hover { background: #58705a; }
+
+/* Слабое железо: backdrop-blur поверх WebGL 60fps — главный жор GPU.
+   body[data-quality=low] ставит движок (эвристика / настройка / автодеградация).
+   Фон rgba остаётся — читаемость не страдает, уходит только дорогое размытие. */
+body[data-quality="low"] .modal-overlay,
+body[data-quality="low"] .hud-pill,
+body[data-quality="low"] .hud-point,
+body[data-quality="low"] .hud-flag,
+body[data-quality="low"] .hud-cross-info,
+body[data-quality="low"] .hud-ammo,
+body[data-quality="low"] .hud-boost {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
 
 /* Уважение к reduced motion */
 @media (prefers-reduced-motion: reduce) {

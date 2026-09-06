@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { DEFAULT_SETTINGS, loadSettings, saveSettings, QUALITY_NAMES, Quality, Settings } from '../game/settings';
+import { DEFAULT_SETTINGS, loadSettings, saveSettings, QUALITY_NAMES, Quality, Settings, syncBodyQualityAttr } from '../game/settings';
 import { audio } from '../game/audio';
 import { Panel } from './common';
 
@@ -11,7 +11,9 @@ interface Props {
 export default function SettingsPanel({ compact, onChanged }: Props) {
   const [s, setS] = useState<Settings>(() => {
     try {
-      return loadSettings();
+      const loaded = loadSettings();
+      try { syncBodyQualityAttr(loaded.quality); } catch { /* */ }
+      return loaded;
     } catch {
       return { ...DEFAULT_SETTINGS };
     }
@@ -21,6 +23,7 @@ export default function SettingsPanel({ compact, onChanged }: Props) {
     const next = { ...s, ...patch };
     setS(next);
     saveSettings(next);
+    try { syncBodyQualityAttr(next.quality); } catch { /* */ }
     // громкость применяем сразу, остальное движок подхватит сам
     try {
       audio.init();
