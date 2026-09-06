@@ -37,12 +37,12 @@ export default function PromotionModal({ promo, totalXp, onClose }: { promo: Pro
   }, []);
 
   return (
-    <div className="absolute inset-0 z-50 flex items-center justify-center bg-olive-950/85 backdrop-blur-sm promo-overlay" onClick={onClose}>
-      <div className="panel p-8 w-[520px] relative text-center promo-card" style={{ borderColor: latest.color + '66' }} onClick={(e) => e.stopPropagation()}>
+    <div className="absolute inset-0 z-50 bg-olive-950/85 backdrop-blur-sm promo-overlay overlay-root" onClick={onClose}>
+      <div className="panel p-6 sm:p-8 overlay-panel relative text-center promo-card" style={{ borderColor: latest.color + '66' }} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Повышение в звании">
         <Corner />
         <div className="promo-flash" />
         <div className="panel-title">★ Повышение в звании ★</div>
-        <div className="promo-title text-5xl font-bold tracking-[0.15em] mt-2" style={{ color: latest.color, textShadow: `0 0 28px ${latest.color}` }}>
+        <div className="promo-title overlay-title mt-2" style={{ color: latest.color, textShadow: `0 0 28px ${latest.color}` }}>
           {latest.name.toUpperCase()}
         </div>
         <div className="mono text-[11px] text-olive-300 mt-1">
@@ -76,9 +76,9 @@ export default function PromotionModal({ promo, totalXp, onClose }: { promo: Pro
         </div>
 
         <Btn variant="primary" className="mt-6 w-full" onClick={onClose}>
-          Служу Отечеству! ▶
+          Продолжить ▶
         </Btn>
-        <div className="mono text-[9px] text-olive-500 mt-2">клик вне окна — тоже закрыть</div>
+        <div className="mono text-[10px] text-olive-500 mt-2">клик вне окна или Esc — тоже закрыть</div>
       </div>
     </div>
   );

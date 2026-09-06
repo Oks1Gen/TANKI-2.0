@@ -367,7 +367,7 @@ function Battle({ cfg, totalXp, onEnd, onMenu, onRetry }: { cfg: BattleConfig; t
         </div>
       )}
       {hud && phase !== 'loading' && !error && <HUD s={hud} staticMap={staticMap} />}
-      {phase === 'loading' && <Loading cfg={cfg} ready={ready} onDone={onLoaded} />}
+      {phase === 'loading' && <Loading cfg={cfg} ready={ready} onDone={onLoaded} onCancel={onMenu} />}
       {phase === 'paused' && <PauseOverlay onResume={resume} onMenu={onMenu} onSettings={applySettingsLive} />}
       {phase === 'results' && result && <ResultsScreen r={result} totalXp={totalXp} onRetry={onRetry} onMenu={onMenu} />}
     </div>

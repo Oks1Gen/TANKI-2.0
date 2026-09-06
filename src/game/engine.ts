@@ -306,7 +306,8 @@ export class GameEngine {
     if (!this.renderer.getContext()) throw new Error('Не удалось получить WebGL-контекст');
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this.lowEnd ? 1 : 1.25));
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = this.lowEnd ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
+    // three >= r17x: PCFSoftShadowMap deprecated (варнинг в консоли) — используем PCFShadowMap везде
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.0;
     this.scene = new THREE.Scene();
